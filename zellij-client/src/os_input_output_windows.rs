@@ -152,3 +152,20 @@ impl Iterator for BlockingSignalIterator {
         self.rx.recv().ok()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn async_signal_listener_can_be_constructed() {
+        let listener = AsyncSignalListener::new();
+        assert!(listener.is_ok(), "AsyncSignalListener::new() should succeed: {:?}", listener.err());
+    }
+
+    #[test]
+    fn blocking_signal_iterator_can_be_constructed() {
+        let iter = BlockingSignalIterator::new();
+        assert!(iter.is_ok(), "BlockingSignalIterator::new() should succeed: {:?}", iter.err());
+    }
+}

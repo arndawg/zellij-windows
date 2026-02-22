@@ -221,3 +221,50 @@ mod windows_only {
         pub static ref WEBSERVER_SOCKET_PATH: PathBuf = ZELLIJ_SOCK_DIR.join("web_server_bus");
     }
 }
+
+#[cfg(test)]
+#[cfg(windows)]
+mod windows_consts_tests {
+    use super::*;
+    use std::env::temp_dir;
+
+    #[test]
+    fn windows_tmp_dir_is_under_system_temp() {
+        let system_temp = temp_dir();
+        assert!(
+            ZELLIJ_TMP_DIR.starts_with(&system_temp),
+            "ZELLIJ_TMP_DIR ({:?}) should be under system temp dir ({:?})",
+            *ZELLIJ_TMP_DIR,
+            system_temp,
+        );
+    }
+
+    #[test]
+    fn windows_log_dir_is_under_tmp_dir() {
+        assert!(
+            ZELLIJ_TMP_LOG_DIR.starts_with(&*ZELLIJ_TMP_DIR),
+            "ZELLIJ_TMP_LOG_DIR ({:?}) should be under ZELLIJ_TMP_DIR ({:?})",
+            *ZELLIJ_TMP_LOG_DIR,
+            *ZELLIJ_TMP_DIR,
+        );
+    }
+
+    #[test]
+    fn windows_log_file_is_under_log_dir() {
+        assert!(
+            ZELLIJ_TMP_LOG_FILE.starts_with(&*ZELLIJ_TMP_LOG_DIR),
+            "ZELLIJ_TMP_LOG_FILE ({:?}) should be under ZELLIJ_TMP_LOG_DIR ({:?})",
+            *ZELLIJ_TMP_LOG_FILE,
+            *ZELLIJ_TMP_LOG_DIR,
+        );
+    }
+
+    #[test]
+    fn windows_sock_dir_is_nonempty_path() {
+        assert!(
+            ZELLIJ_SOCK_DIR.components().count() > 0,
+            "ZELLIJ_SOCK_DIR should be a non-empty path, got {:?}",
+            *ZELLIJ_SOCK_DIR,
+        );
+    }
+}
