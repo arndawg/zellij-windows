@@ -315,8 +315,8 @@ impl WindowsPtyBackend {
     }
 
     pub fn kill(&self, pid: u32) -> Result<()> {
-        let map = self.terminal_id_to_master.lock().to_anyhow()?;
-        for handle_opt in map.values() {
+        let mut map = self.terminal_id_to_master.lock().to_anyhow()?;
+        for handle_opt in map.values_mut() {
             if let Some(handle) = handle_opt {
                 if handle.child_pid == pid {
                     let _ = handle.killer.kill();
