@@ -6,7 +6,7 @@ use crate::plugins::wasm_bridge::handle_plugin_crash;
 use crate::pty::{ClientTabIndexOrPaneId, PtyInstruction};
 use crate::route::{route_action, wait_for_action_completion, NotificationEnd};
 use crate::ServerInstruction;
-use interprocess::local_socket::{prelude::*, GenericFilePath, Stream as LocalSocketStream};
+use interprocess::local_socket::{prelude::*, Stream as LocalSocketStream};
 use log::warn;
 use serde::Serialize;
 use std::{
@@ -3165,7 +3165,7 @@ fn disconnect_other_clients(env: &PluginEnv) {
 fn kill_sessions(session_names: Vec<String>) {
     for session_name in session_names {
         let path = &*ZELLIJ_SOCK_DIR.join(&session_name);
-        let fs_name = match path.to_fs_name::<GenericFilePath>() {
+        let fs_name = match zellij_utils::ipc::path_to_ipc_name(path) {
             Ok(name) => name,
             Err(e) => {
                 log::error!(

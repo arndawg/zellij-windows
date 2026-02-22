@@ -691,7 +691,7 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
     let _ = thread::Builder::new()
         .name("server_listener".to_string())
         .spawn({
-            use interprocess::local_socket::{prelude::*, GenericFilePath, ListenerOptions};
+            use interprocess::local_socket::{prelude::*, ListenerOptions};
             use zellij_utils::shared::set_permissions;
 
             let os_input = os_input.clone();
@@ -706,9 +706,7 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                 drop(std::fs::remove_file(&socket_path));
                 let listener = ListenerOptions::new()
                     .name(
-                        socket_path
-                            .as_path()
-                            .to_fs_name::<GenericFilePath>()
+                        zellij_utils::ipc::path_to_ipc_name(socket_path.as_path())
                             .unwrap(),
                     )
                     .create_sync()

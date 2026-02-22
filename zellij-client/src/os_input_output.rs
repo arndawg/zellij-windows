@@ -8,7 +8,7 @@ use crate::os_input_output_unix::{AsyncSignalListener, BlockingSignalIterator};
 #[cfg(windows)]
 use crate::os_input_output_windows::{AsyncSignalListener, BlockingSignalIterator};
 
-use interprocess::local_socket::{prelude::*, GenericFilePath, Stream as LocalSocketStream};
+use interprocess::local_socket::{prelude::*, Stream as LocalSocketStream};
 use std::io::prelude::*;
 use std::io::IsTerminal;
 use std::path::Path;
@@ -257,8 +257,7 @@ impl ClientOsApi for ClientOsInputOutput {
         }
     }
     fn connect_to_server(&self, path: &Path) {
-        let fs_name = path
-            .to_fs_name::<GenericFilePath>()
+        let fs_name = zellij_utils::ipc::path_to_ipc_name(path)
             .expect("failed to convert path to socket name");
         let socket;
         loop {

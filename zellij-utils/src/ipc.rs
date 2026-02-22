@@ -5,13 +5,16 @@ use crate::{
     input::{actions::Action, cli_assets::CliAssets},
     pane_size::{Size, SizeInPixels},
 };
-use interprocess::local_socket::Stream as LocalSocketStream;
+use interprocess::local_socket::{prelude::*, Name, Stream as LocalSocketStream};
+#[cfg(not(windows))]
+use interprocess::local_socket::GenericFilePath;
 use log::warn;
 use serde::{Deserialize, Serialize};
 use std::{
     fmt::{Display, Error, Formatter},
     io::{self, Read, Write},
     marker::PhantomData,
+    path::Path,
 };
 
 // Protobuf imports
@@ -25,6 +28,39 @@ mod protobuf_conversion;
 
 #[cfg(test)]
 mod tests;
+
+/// Convert a filesystem path to an IPC socket name.
+///
+/// On Unix, this passes through to `to_fs_name::<GenericFilePath>()` (Unix domain socket).
+/// On Windows, named pipes require `\\.\pipe\name` format, so we derive a deterministic
+/// pipe name from the last two path components (e.g. `contract_version_1/session_name`
+/// becomes `\\.\pipe\zellij-contract_version_1-session_name`).
+pub fn path_to_ipc_name(path: &Path) -> io::Result<Name<'_>> {
+    #[cfg(not(windows))]
+    {
+        path.to_fs_name::<GenericFilePath>()
+    }
+    #[cfg(windows)]
+    {
+        use interprocess::local_socket::GenericNamespaced;
+        let components: Vec<&str> = path
+            .components()
+            .filter_map(|c| c.as_os_str().to_str())
+            .collect();
+        let name = if components.len() >= 2 {
+            let len = components.len();
+            format!("zellij-{}-{}", components[len - 2], components[len - 1])
+        } else {
+            format!(
+                "zellij-{}",
+                path.display()
+                    .to_string()
+                    .replace(['\\', '/', ':'], "-")
+            )
+        };
+        name.to_ns_name::<GenericNamespaced>()
+    }
+}
 
 type SessionId = u64;
 

@@ -1,6 +1,8 @@
+#[cfg(unix)]
+use crate::consts::is_ipc_socket;
 use crate::{
     consts::{
-        is_ipc_socket, session_info_folder_for_session, session_layout_cache_file_name,
+        session_info_folder_for_session, session_layout_cache_file_name,
         ZELLIJ_SESSION_INFO_CACHE_DIR, ZELLIJ_SOCK_DIR,
     },
     envs,
@@ -9,37 +11,67 @@ use crate::{
 };
 use anyhow;
 use humantime::format_duration;
-use interprocess::local_socket::{prelude::*, GenericFilePath, Stream as LocalSocketStream};
+use crate::ipc::path_to_ipc_name;
+use interprocess::local_socket::{prelude::*, Stream as LocalSocketStream};
 use std::collections::HashMap;
 use std::time::{Duration, SystemTime};
 use std::{fs, io, process};
 use suggest::Suggest;
 
 pub fn get_sessions() -> Result<Vec<(String, Duration)>, io::ErrorKind> {
-    match fs::read_dir(&*ZELLIJ_SOCK_DIR) {
-        Ok(files) => {
-            let mut sessions = Vec::new();
-            files.for_each(|file| {
-                if let Ok(file) = file {
-                    let file_name = file.file_name().into_string().unwrap();
-                    // try to get creation time, fall back to modification time on platforms where it's not supported (e.g., musl)
-                    // for session creation time these are almost always identical (notable
-                    // exceptions are session name changes)
-                    let ctime = std::fs::metadata(&file.path())
-                        .ok()
-                        .and_then(|f| f.created().ok().or_else(|| f.modified().ok()))
-                        .and_then(|d| d.elapsed().ok())
-                        .unwrap_or_default();
-                    let duration = Duration::from_secs(ctime.as_secs());
-                    if is_ipc_socket(&file.file_type().unwrap()) && assert_socket(&file_name) {
-                        sessions.push((file_name, duration));
+    // On Unix, discover sessions by scanning ZELLIJ_SOCK_DIR for socket files.
+    // On Windows, named pipes don't create filesystem artifacts, so we discover
+    // sessions from the session info cache and probe each via named pipe.
+    #[cfg(unix)]
+    {
+        match fs::read_dir(&*ZELLIJ_SOCK_DIR) {
+            Ok(files) => {
+                let mut sessions = Vec::new();
+                files.for_each(|file| {
+                    if let Ok(file) = file {
+                        let file_name = file.file_name().into_string().unwrap();
+                        let ctime = std::fs::metadata(&file.path())
+                            .ok()
+                            .and_then(|f| f.created().ok().or_else(|| f.modified().ok()))
+                            .and_then(|d| d.elapsed().ok())
+                            .unwrap_or_default();
+                        let duration = Duration::from_secs(ctime.as_secs());
+                        if is_ipc_socket(&file.file_type().unwrap()) && assert_socket(&file_name) {
+                            sessions.push((file_name, duration));
+                        }
+                    }
+                });
+                Ok(sessions)
+            },
+            Err(err) if io::ErrorKind::NotFound != err.kind() => Err(err.kind()),
+            Err(_) => Ok(Vec::with_capacity(0)),
+        }
+    }
+    #[cfg(windows)]
+    {
+        match fs::read_dir(&*ZELLIJ_SESSION_INFO_CACHE_DIR) {
+            Ok(entries) => {
+                let mut sessions = Vec::new();
+                for entry in entries.filter_map(|e| e.ok()) {
+                    if entry.path().is_dir() {
+                        if let Some(name) = entry.file_name().to_str() {
+                            let ctime = std::fs::metadata(&entry.path())
+                                .ok()
+                                .and_then(|f| f.created().ok().or_else(|| f.modified().ok()))
+                                .and_then(|d| d.elapsed().ok())
+                                .unwrap_or_default();
+                            let duration = Duration::from_secs(ctime.as_secs());
+                            if assert_socket(name) {
+                                sessions.push((name.to_string(), duration));
+                            }
+                        }
                     }
                 }
-            });
-            Ok(sessions)
-        },
-        Err(err) if io::ErrorKind::NotFound != err.kind() => Err(err.kind()),
-        Err(_) => Ok(Vec::with_capacity(0)),
+                Ok(sessions)
+            },
+            Err(err) if io::ErrorKind::NotFound != err.kind() => Err(err.kind()),
+            Err(_) => Ok(Vec::with_capacity(0)),
+        }
     }
 }
 
@@ -118,30 +150,57 @@ pub fn get_resurrectable_session_names() -> Vec<String> {
 }
 
 pub fn get_sessions_sorted_by_mtime() -> anyhow::Result<Vec<String>> {
-    match fs::read_dir(&*ZELLIJ_SOCK_DIR) {
-        Ok(files) => {
-            let mut sessions_with_mtime: Vec<(String, SystemTime)> = Vec::new();
-            for file in files {
-                let file = file?;
-                let file_name = file.file_name().into_string().unwrap();
-                let file_modified_at = file.metadata()?.modified()?;
-                if is_ipc_socket(&file.file_type()?) && assert_socket(&file_name) {
-                    sessions_with_mtime.push((file_name, file_modified_at));
+    #[cfg(unix)]
+    {
+        match fs::read_dir(&*ZELLIJ_SOCK_DIR) {
+            Ok(files) => {
+                let mut sessions_with_mtime: Vec<(String, SystemTime)> = Vec::new();
+                for file in files {
+                    let file = file?;
+                    let file_name = file.file_name().into_string().unwrap();
+                    let file_modified_at = file.metadata()?.modified()?;
+                    if is_ipc_socket(&file.file_type()?) && assert_socket(&file_name) {
+                        sessions_with_mtime.push((file_name, file_modified_at));
+                    }
                 }
-            }
-            sessions_with_mtime.sort_by_key(|x| x.1); // the oldest one will be the first
+                sessions_with_mtime.sort_by_key(|x| x.1); // the oldest one will be the first
 
-            let sessions = sessions_with_mtime.iter().map(|x| x.0.clone()).collect();
-            Ok(sessions)
-        },
-        Err(err) if io::ErrorKind::NotFound != err.kind() => Err(err.into()),
-        Err(_) => Ok(Vec::with_capacity(0)),
+                let sessions = sessions_with_mtime.iter().map(|x| x.0.clone()).collect();
+                Ok(sessions)
+            },
+            Err(err) if io::ErrorKind::NotFound != err.kind() => Err(err.into()),
+            Err(_) => Ok(Vec::with_capacity(0)),
+        }
+    }
+    #[cfg(windows)]
+    {
+        match fs::read_dir(&*ZELLIJ_SESSION_INFO_CACHE_DIR) {
+            Ok(entries) => {
+                let mut sessions_with_mtime: Vec<(String, SystemTime)> = Vec::new();
+                for entry in entries {
+                    let entry = entry?;
+                    if entry.path().is_dir() {
+                        if let Some(name) = entry.file_name().to_str() {
+                            let file_modified_at = entry.metadata()?.modified()?;
+                            if assert_socket(name) {
+                                sessions_with_mtime.push((name.to_string(), file_modified_at));
+                            }
+                        }
+                    }
+                }
+                sessions_with_mtime.sort_by_key(|x| x.1);
+                let sessions = sessions_with_mtime.iter().map(|x| x.0.clone()).collect();
+                Ok(sessions)
+            },
+            Err(err) if io::ErrorKind::NotFound != err.kind() => Err(err.into()),
+            Err(_) => Ok(Vec::with_capacity(0)),
+        }
     }
 }
 
 fn assert_socket(name: &str) -> bool {
     let path = &*ZELLIJ_SOCK_DIR.join(name);
-    let fs_name = match path.to_fs_name::<GenericFilePath>() {
+    let fs_name = match path_to_ipc_name(path) {
         Ok(name) => name,
         Err(_) => return false,
     };
@@ -247,7 +306,7 @@ pub fn get_active_session() -> ActiveSession {
 
 pub fn kill_session(name: &str) {
     let path = &*ZELLIJ_SOCK_DIR.join(name);
-    let fs_name = match path.to_fs_name::<GenericFilePath>() {
+    let fs_name = match path_to_ipc_name(path) {
         Ok(name) => name,
         Err(e) => {
             eprintln!("Error occurred: {:?}", e);
@@ -269,8 +328,7 @@ pub fn kill_session(name: &str) {
 pub fn delete_session(name: &str, force: bool) {
     if force {
         let path = &*ZELLIJ_SOCK_DIR.join(name);
-        let _ = path
-            .to_fs_name::<GenericFilePath>()
+        let _ = path_to_ipc_name(path)
             .ok()
             .and_then(|fs_name| LocalSocketStream::connect(fs_name).ok())
             .map(|stream| {
