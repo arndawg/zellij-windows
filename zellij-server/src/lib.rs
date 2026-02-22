@@ -24,10 +24,12 @@ mod terminal_bytes;
 mod thread_bus;
 mod ui;
 
+#[cfg(unix)]
 pub use daemonize;
 
 use background_jobs::{background_jobs_main, BackgroundJob};
 use log::info;
+#[cfg(unix)]
 use nix::sys::stat::{umask, Mode};
 use pty_writer::{pty_writer_main, PtyWriteInstruction};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -654,14 +656,22 @@ impl SessionState {
 pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
     info!("Starting Zellij server!");
 
-    // preserve the current umask: read current value by setting to another mode, and then restoring it
-    let current_umask = umask(Mode::all());
-    umask(current_umask);
-    daemonize::Daemonize::new()
-        .working_directory(std::env::current_dir().unwrap())
-        .umask(current_umask.bits() as u32)
-        .start()
-        .expect("could not daemonize the server process");
+    #[cfg(unix)]
+    {
+        // preserve the current umask: read current value by setting to another mode, and then restoring it
+        let current_umask = umask(Mode::all());
+        umask(current_umask);
+        daemonize::Daemonize::new()
+            .working_directory(std::env::current_dir().unwrap())
+            .umask(current_umask.bits() as u32)
+            .start()
+            .expect("could not daemonize the server process");
+    }
+    #[cfg(windows)]
+    {
+        // On Windows, the caller (commands.rs) handles spawning us as a
+        // detached process with CREATE_NO_WINDOW. No fork/daemonize needed.
+    }
 
     envs::set_zellij("0".to_string());
 
@@ -690,6 +700,9 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
             let to_server = to_server.clone();
             let socket_path = socket_path.clone();
             move || {
+                // On Unix, clean up stale socket files; on Windows named pipes
+                // are managed by the OS and don't leave filesystem artifacts.
+                #[cfg(unix)]
                 drop(std::fs::remove_file(&socket_path));
                 let listener = ListenerOptions::new()
                     .name(
@@ -704,6 +717,7 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                 // https://specifications.freedesktop.org/basedir-spec/basedir-spec-latest.html states that for XDG_RUNTIME_DIR:
                 // "To ensure that your files are not removed, they should have their access time timestamp modified at least once every 6 hours of monotonic time or the 'sticky' bit should be set on the file. "
                 // It is not guaranteed that all platforms allow setting the sticky bit on sockets!
+                #[cfg(unix)]
                 drop(set_permissions(&socket_path, 0o1700));
                 for stream in listener.incoming() {
                     match stream {

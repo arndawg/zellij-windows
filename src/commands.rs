@@ -160,6 +160,35 @@ fn get_os_input<OsInputOutput>(
 pub(crate) fn start_server(path: PathBuf, debug: bool) {
     // Set instance-wide debug mode
     zellij_utils::consts::DEBUG_MODE.set(debug).unwrap();
+
+    #[cfg(windows)]
+    {
+        // On Windows there is no fork/daemonize. Instead we re-spawn the
+        // current executable as a detached, window-less process when we are
+        // not already running in server mode.
+        if std::env::var("ZELLIJ_SERVER_MODE").is_err() {
+            use std::os::windows::process::CommandExt;
+            const CREATE_NO_WINDOW: u32 = 0x08000000;
+            const CREATE_NEW_PROCESS_GROUP: u32 = 0x00000200;
+
+            let exe = std::env::current_exe().expect("failed to get current exe path");
+            // Reconstruct the args that were used to start this server
+            let mut args: Vec<String> = std::env::args().skip(1).collect();
+            // Ensure debug flag propagates
+            if debug && !args.contains(&"--debug".to_string()) {
+                args.push("--debug".to_string());
+            }
+
+            std::process::Command::new(exe)
+                .args(&args)
+                .env("ZELLIJ_SERVER_MODE", "1")
+                .creation_flags(CREATE_NO_WINDOW | CREATE_NEW_PROCESS_GROUP)
+                .spawn()
+                .expect("failed to spawn detached server process");
+            return;
+        }
+    }
+
     let os_input = get_os_input(get_server_os_input);
     start_server_impl(Box::new(os_input), path);
 }

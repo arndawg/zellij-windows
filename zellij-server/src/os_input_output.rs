@@ -486,6 +486,7 @@ impl ServerOsApi for ServerOsInputOutput {
     fn get_all_cmds_by_ppid(&self, post_hook: &Option<String>) -> HashMap<String, Vec<String>> {
         // the key is the stringified ppid
         let mut cmds = HashMap::new();
+        #[cfg(unix)]
         if let Some(output) = Command::new("ps")
             .args(vec!["-ao", "ppid,args"])
             .output()
@@ -526,6 +527,13 @@ impl ServerOsApi for ServerOsInputOutput {
                     }
                 }
             }
+        }
+        #[cfg(windows)]
+        {
+            // On Windows, `ps -ao ppid,args` is not available. Use sysinfo
+            // to enumerate processes. For now, return an empty map as the
+            // resurrection hook is a best-effort feature.
+            let _ = post_hook;
         }
         cmds
     }
@@ -624,8 +632,15 @@ fn run_command_hook(
     original_command: &str,
     hook_script: &str,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    #[cfg(unix)]
     let output = Command::new("sh")
         .arg("-c")
+        .arg(hook_script)
+        .env("RESURRECT_COMMAND", original_command)
+        .output()?;
+    #[cfg(windows)]
+    let output = Command::new("cmd")
+        .arg("/C")
         .arg(hook_script)
         .env("RESURRECT_COMMAND", original_command)
         .output()?;

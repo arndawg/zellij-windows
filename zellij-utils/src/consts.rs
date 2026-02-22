@@ -194,3 +194,30 @@ mod unix_only {
         pub static ref WEBSERVER_SOCKET_PATH: PathBuf = ZELLIJ_SOCK_DIR.join("web_server_bus");
     }
 }
+
+#[cfg(windows)]
+pub use windows_only::*;
+
+#[cfg(windows)]
+mod windows_only {
+    use super::*;
+    use crate::envs;
+    pub use crate::shared::set_permissions;
+    use lazy_static::lazy_static;
+    use std::env::temp_dir;
+
+    lazy_static! {
+        pub static ref ZELLIJ_TMP_DIR: PathBuf = temp_dir().join("zellij");
+        pub static ref ZELLIJ_TMP_LOG_DIR: PathBuf = ZELLIJ_TMP_DIR.join("zellij-log");
+        pub static ref ZELLIJ_TMP_LOG_FILE: PathBuf = ZELLIJ_TMP_LOG_DIR.join("zellij.log");
+        pub static ref ZELLIJ_SOCK_DIR: PathBuf = {
+            let mut ipc_dir = envs::get_socket_dir().map_or_else(
+                |_| ZELLIJ_CACHE_DIR.clone(),
+                PathBuf::from,
+            );
+            ipc_dir.push(CLIENT_SERVER_CONTRACT_DIR.clone());
+            ipc_dir
+        };
+        pub static ref WEBSERVER_SOCKET_PATH: PathBuf = ZELLIJ_SOCK_DIR.join("web_server_bus");
+    }
+}

@@ -2222,8 +2222,18 @@ fn send_command_not_found_to_screen(
 }
 
 pub fn get_default_shell() -> PathBuf {
-    PathBuf::from(std::env::var("SHELL").unwrap_or_else(|_| {
-        log::warn!("Cannot read SHELL env, falling back to use /bin/sh");
-        "/bin/sh".to_string()
-    }))
+    #[cfg(unix)]
+    {
+        PathBuf::from(std::env::var("SHELL").unwrap_or_else(|_| {
+            log::warn!("Cannot read SHELL env, falling back to /bin/sh");
+            "/bin/sh".to_string()
+        }))
+    }
+    #[cfg(windows)]
+    {
+        PathBuf::from(std::env::var("COMSPEC").unwrap_or_else(|_| {
+            log::warn!("Cannot read COMSPEC env, falling back to cmd.exe");
+            "cmd.exe".to_string()
+        }))
+    }
 }
