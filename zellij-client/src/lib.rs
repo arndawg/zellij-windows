@@ -262,17 +262,34 @@ pub fn spawn_server(socket_path: &Path, debug: bool) -> io::Result<()> {
     if debug {
         cmd.arg("--debug");
     }
-    let status = cmd.status()?;
 
-    if status.success() {
+    // On Unix, the server daemonizes (double-fork) so the parent exits immediately
+    // and cmd.status() returns. On Windows there's no fork, so we launch the server
+    // as a detached background process and return immediately.
+    #[cfg(not(windows))]
+    {
+        let status = cmd.status()?;
+        if status.success() {
+            Ok(())
+        } else {
+            let msg = "Process returned non-zero exit code";
+            let err_msg = match status.code() {
+                Some(c) => format!("{}: {}", msg, c),
+                None => msg.to_string(),
+            };
+            Err(io::Error::new(io::ErrorKind::Other, err_msg))
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        // CREATE_NEW_PROCESS_GROUP (0x200): server survives if client's console closes
+        // CREATE_NO_WINDOW (0x08000000): server doesn't open a new console window
+        cmd.creation_flags(0x200 | 0x08000000);
+        let _child = cmd.spawn()?;
+        // Drop the Child handle without waiting — the server runs independently.
+        // On Windows, dropping Child does NOT kill the process.
         Ok(())
-    } else {
-        let msg = "Process returned non-zero exit code";
-        let err_msg = match status.code() {
-            Some(c) => format!("{}: {}", msg, c),
-            None => msg.to_string(),
-        };
-        Err(io::Error::new(io::ErrorKind::Other, err_msg))
     }
 }
 
