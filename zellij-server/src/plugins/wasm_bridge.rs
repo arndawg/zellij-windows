@@ -83,6 +83,14 @@ impl PluginRenderAsset {
     }
 }
 
+/// Sanitize a URL string for use as a directory name component.
+/// On Windows, characters like `:` and `/` are illegal in path components.
+fn sanitize_plugin_url_for_path(url: &str) -> String {
+    url.replace(':', "_")
+        .replace('/', "_")
+        .replace('\\', "_")
+}
+
 #[derive(Debug, Clone)]
 pub struct LoadingContext {
     pub plugin_id: PluginId,
@@ -114,11 +122,14 @@ impl LoadingContext {
         tab_index: Option<usize>,
         size: Size,
     ) -> Self {
+        let plugin_url_dir_name = sanitize_plugin_url_for_path(
+            &Url::from(&plugin_config.location).to_string(),
+        );
         let plugin_own_data_dir = ZELLIJ_SESSION_CACHE_DIR
-            .join(Url::from(&plugin_config.location).to_string())
+            .join(&plugin_url_dir_name)
             .join(format!("{}-{}", plugin_id, client_id));
         let plugin_own_cache_dir = ZELLIJ_CACHE_DIR
-            .join(Url::from(&plugin_config.location).to_string())
+            .join(&plugin_url_dir_name)
             .join(format!("plugin_cache"));
         let default_mode = wasm_bridge
             .base_modes

@@ -452,9 +452,8 @@ impl<'a> PluginLoader<'a> {
 
         // Mount directories using the builder
         for (guest_path, host_path) in dirs {
-            match std::fs::File::open(&host_path) {
-                Ok(dir_file) => {
-                    let dir = Dir::from_std_file(dir_file);
+            match Dir::open_ambient_dir(&host_path, wasmi_wasi::sync::ambient_authority()) {
+                Ok(dir) => {
                     builder.preopened_dir(dir, guest_path)?;
                 },
                 Err(e) => {
