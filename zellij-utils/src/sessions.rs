@@ -212,20 +212,48 @@ fn assert_socket(name: &str) -> bool {
     rx.recv_timeout(Duration::from_secs(3)).unwrap_or(false)
 }
 
-fn assert_socket_inner(name: &str, path: &std::path::Path) -> bool {
+fn assert_socket_inner(_name: &str, path: &std::path::Path) -> bool {
     let fs_name = match path_to_ipc_name(path) {
         Ok(name) => name,
         Err(_) => return false,
     };
     match LocalSocketStream::connect(fs_name) {
         Ok(stream) => {
-            let mut sender: IpcSenderWithContext<ClientToServerMsg> =
-                IpcSenderWithContext::new(stream);
-            let _ = sender.send_client_msg(ClientToServerMsg::ConnStatus);
-            let mut receiver: IpcReceiverWithContext<ServerToClientMsg> = sender.get_receiver();
-            match receiver.recv_server_msg() {
-                Some((ServerToClientMsg::Connected, _)) => true,
-                None | Some((_, _)) => false,
+            // On Windows, the server uses dual pipes: main (client→server) and
+            // reverse (server→client). We must connect to both so the server's
+            // listener thread doesn't block waiting for the reverse connection.
+            // The response comes on the reverse pipe, not the main pipe.
+            #[cfg(windows)]
+            {
+                let reverse_name = match crate::ipc::path_to_ipc_name_reverse(path) {
+                    Ok(name) => name,
+                    Err(_) => return false,
+                };
+                let reverse_stream = match LocalSocketStream::connect(reverse_name) {
+                    Ok(s) => s,
+                    Err(_) => return false,
+                };
+                let mut sender: IpcSenderWithContext<ClientToServerMsg> =
+                    IpcSenderWithContext::new(stream);
+                let _ = sender.send_client_msg(ClientToServerMsg::ConnStatus);
+                let mut receiver: IpcReceiverWithContext<ServerToClientMsg> =
+                    IpcReceiverWithContext::new(reverse_stream);
+                match receiver.recv_server_msg() {
+                    Some((ServerToClientMsg::Connected, _)) => true,
+                    None | Some((_, _)) => false,
+                }
+            }
+            #[cfg(not(windows))]
+            {
+                let mut sender: IpcSenderWithContext<ClientToServerMsg> =
+                    IpcSenderWithContext::new(stream);
+                let _ = sender.send_client_msg(ClientToServerMsg::ConnStatus);
+                let mut receiver: IpcReceiverWithContext<ServerToClientMsg> =
+                    sender.get_receiver();
+                match receiver.recv_server_msg() {
+                    Some((ServerToClientMsg::Connected, _)) => true,
+                    None | Some((_, _)) => false,
+                }
             }
         },
         Err(e) if e.kind() == io::ErrorKind::ConnectionRefused => {

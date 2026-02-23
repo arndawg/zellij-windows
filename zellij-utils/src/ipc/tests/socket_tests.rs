@@ -1,19 +1,25 @@
 use crate::ipc::{
     ClientToServerMsg, IpcReceiverWithContext, IpcSenderWithContext, ServerToClientMsg,
 };
+#[cfg(not(windows))]
 use crate::pane_size::Size;
-use interprocess::local_socket::{prelude::*, GenericFilePath, ListenerOptions, Stream as LocalSocketStream};
+use interprocess::local_socket::{prelude::*, ListenerOptions, Stream as LocalSocketStream};
+#[cfg(not(windows))]
+use interprocess::local_socket::GenericFilePath;
 #[cfg(not(windows))]
 use std::os::unix::fs::FileTypeExt;
+#[cfg(not(windows))]
 use std::path::PathBuf;
 use tempfile::TempDir;
 
+#[cfg(not(windows))]
 fn socket_path() -> (TempDir, PathBuf) {
     let dir = TempDir::new().expect("failed to create temp dir");
     let path = dir.path().join("test.sock");
     (dir, path)
 }
 
+#[cfg(not(windows))]
 #[test]
 fn client_to_server_message_over_socket() {
     let (_dir, path) = socket_path();
@@ -47,6 +53,7 @@ fn client_to_server_message_over_socket() {
     client.join().expect("client thread panicked");
 }
 
+#[cfg(not(windows))]
 #[test]
 fn server_to_client_message_over_socket() {
     let (_dir, path) = socket_path();
@@ -77,6 +84,7 @@ fn server_to_client_message_over_socket() {
     server.join().expect("server thread panicked");
 }
 
+#[cfg(not(windows))]
 #[test]
 fn bidirectional_communication_via_fd_duplication() {
     let (_dir, path) = socket_path();
@@ -124,6 +132,7 @@ fn bidirectional_communication_via_fd_duplication() {
     server.join().expect("server thread panicked");
 }
 
+#[cfg(not(windows))]
 #[test]
 fn multiple_messages_in_sequence() {
     let (_dir, path) = socket_path();
@@ -172,6 +181,7 @@ fn multiple_messages_in_sequence() {
     client.join().expect("client thread panicked");
 }
 
+#[cfg(not(windows))]
 #[test]
 fn receiver_returns_none_on_closed_connection() {
     let (_dir, path) = socket_path();
@@ -236,6 +246,7 @@ fn is_socket_rejects_regular_file() {
     );
 }
 
+#[cfg(not(windows))]
 #[test]
 fn session_probe_accepts_responding_socket() {
     // Simulates the assert_socket() pattern from sessions.rs:
@@ -278,6 +289,7 @@ fn session_probe_accepts_responding_socket() {
     server.join().expect("server thread panicked");
 }
 
+#[cfg(not(windows))]
 #[test]
 fn session_probe_rejects_dead_socket() {
     // Simulates discovering a stale socket file with no listener.
@@ -326,4 +338,194 @@ fn socket_directory_enumeration_finds_sockets() {
 
     assert_eq!(entries.len(), 1, "should find exactly one socket");
     assert_eq!(entries[0], "test-session");
+}
+
+/// On Windows, session probing uses dual named pipes: the client sends ConnStatus
+/// on the main pipe and reads the Connected response from the reverse pipe.
+/// This test simulates the full dual-pipe handshake used by assert_socket().
+#[cfg(windows)]
+#[test]
+fn windows_dual_pipe_session_probe() {
+    use crate::ipc::path_to_ipc_name;
+    use crate::ipc::path_to_ipc_name_reverse;
+
+    // Create a fake session path
+    let dir = TempDir::new().expect("failed to create temp dir");
+    // path_to_ipc_name needs at least 2 components for the pipe name
+    let session_path = dir.path().join("contract_version_1").join("test_session");
+    std::fs::create_dir_all(&session_path).ok();
+
+    let main_name = path_to_ipc_name(&session_path).expect("main pipe name");
+    let reverse_name = path_to_ipc_name_reverse(&session_path).expect("reverse pipe name");
+
+    let main_listener = ListenerOptions::new()
+        .name(main_name)
+        .create_sync()
+        .expect("main listener");
+    let reverse_listener = ListenerOptions::new()
+        .name(reverse_name.clone())
+        .create_sync()
+        .expect("reverse listener");
+
+    // Spawn a fake server that mimics the real dual-pipe server
+    let server = std::thread::spawn(move || {
+        // Accept main connection (client→server)
+        let main_stream = main_listener
+            .incoming()
+            .next()
+            .unwrap()
+            .expect("main accept");
+        // Accept reverse connection (server→client)
+        let reverse_stream = reverse_listener.accept().expect("reverse accept");
+
+        // Read ConnStatus from main pipe
+        let mut receiver: IpcReceiverWithContext<ClientToServerMsg> =
+            IpcReceiverWithContext::new(main_stream);
+        let msg = receiver.recv_client_msg();
+        assert!(
+            matches!(msg, Some((ClientToServerMsg::ConnStatus, _))),
+            "server should receive ConnStatus"
+        );
+
+        // Send Connected on reverse pipe
+        let mut sender: IpcSenderWithContext<ServerToClientMsg> =
+            IpcSenderWithContext::new(reverse_stream);
+        sender
+            .send_server_msg(ServerToClientMsg::Connected)
+            .expect("send Connected");
+    });
+
+    // Client-side probing (mirrors assert_socket_inner on Windows)
+    let main_name = path_to_ipc_name(&session_path).expect("main pipe name");
+    let main_stream =
+        LocalSocketStream::connect(main_name).expect("connect main");
+    let reverse_stream =
+        LocalSocketStream::connect(reverse_name).expect("connect reverse");
+
+    let mut sender: IpcSenderWithContext<ClientToServerMsg> =
+        IpcSenderWithContext::new(main_stream);
+    sender
+        .send_client_msg(ClientToServerMsg::ConnStatus)
+        .expect("send ConnStatus");
+
+    let mut receiver: IpcReceiverWithContext<ServerToClientMsg> =
+        IpcReceiverWithContext::new(reverse_stream);
+    let result = receiver.recv_server_msg();
+    assert!(
+        matches!(result, Some((ServerToClientMsg::Connected, _))),
+        "dual-pipe probe should return Connected, got: {:?}",
+        result
+    );
+
+    server.join().expect("server thread panicked");
+}
+
+/// Tests that when a probe connects only to the main pipe (without the reverse
+/// pipe), the server's listener doesn't permanently wedge. The server should
+/// time out and continue accepting new connections.
+#[cfg(windows)]
+#[test]
+fn windows_probe_without_reverse_pipe_does_not_wedge_server() {
+    use crate::ipc::path_to_ipc_name;
+    use crate::ipc::path_to_ipc_name_reverse;
+    use std::sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    };
+
+    let dir = TempDir::new().expect("failed to create temp dir");
+    let session_path = dir.path().join("contract_version_1").join("probe_test");
+    std::fs::create_dir_all(&session_path).ok();
+
+    let main_name = path_to_ipc_name(&session_path).expect("main pipe name");
+    let reverse_name = path_to_ipc_name_reverse(&session_path).expect("reverse pipe name");
+
+    let main_listener = ListenerOptions::new()
+        .name(main_name)
+        .create_sync()
+        .expect("main listener");
+    let reverse_listener = ListenerOptions::new()
+        .name(reverse_name.clone())
+        .create_sync()
+        .expect("reverse listener");
+
+    let second_client_served = Arc::new(AtomicBool::new(false));
+    let second_client_served_clone = second_client_served.clone();
+
+    // Spawn a server that mimics the real listener pattern:
+    // a dedicated thread accepts reverse connections and feeds them via channel.
+    let server = std::thread::spawn(move || {
+        let (reverse_tx, reverse_rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            for stream in reverse_listener.incoming() {
+                match stream {
+                    Ok(s) => {
+                        if reverse_tx.send(s).is_err() {
+                            break;
+                        }
+                    },
+                    Err(_) => break,
+                }
+            }
+        });
+
+        for stream in main_listener.incoming() {
+            match stream {
+                Ok(main_stream) => {
+                    match reverse_rx.recv_timeout(std::time::Duration::from_secs(2)) {
+                        Ok(reverse_stream) => {
+                            // Full client — read ConnStatus, send Connected
+                            let mut receiver: IpcReceiverWithContext<ClientToServerMsg> =
+                                IpcReceiverWithContext::new(main_stream);
+                            let _msg = receiver.recv_client_msg();
+                            let mut sender: IpcSenderWithContext<ServerToClientMsg> =
+                                IpcSenderWithContext::new(reverse_stream);
+                            let _ = sender.send_server_msg(ServerToClientMsg::Connected);
+                            second_client_served_clone.store(true, Ordering::SeqCst);
+                            break;
+                        },
+                        Err(_) => {
+                            // Probe-only — no reverse connection, skip
+                            drop(main_stream);
+                            continue;
+                        },
+                    }
+                },
+                Err(_) => break,
+            }
+        }
+    });
+
+    // First: connect only to main pipe (simulate a bad probe)
+    let main_name = path_to_ipc_name(&session_path).expect("main pipe name");
+    let _probe_stream = LocalSocketStream::connect(main_name).expect("probe connect");
+    // Don't connect to reverse pipe — drop the probe after a moment
+    std::thread::sleep(std::time::Duration::from_secs(3));
+    drop(_probe_stream);
+
+    // Second: connect properly to both pipes (simulate a real client)
+    let main_name = path_to_ipc_name(&session_path).expect("main pipe name");
+    let main_stream = LocalSocketStream::connect(main_name).expect("real connect main");
+    let reverse_stream =
+        LocalSocketStream::connect(reverse_name).expect("real connect reverse");
+
+    let mut sender: IpcSenderWithContext<ClientToServerMsg> =
+        IpcSenderWithContext::new(main_stream);
+    sender
+        .send_client_msg(ClientToServerMsg::ConnStatus)
+        .expect("send ConnStatus");
+
+    let mut receiver: IpcReceiverWithContext<ServerToClientMsg> =
+        IpcReceiverWithContext::new(reverse_stream);
+    let result = receiver.recv_server_msg();
+    assert!(
+        matches!(result, Some((ServerToClientMsg::Connected, _))),
+        "second (real) client should get Connected after probe timed out"
+    );
+
+    server.join().expect("server thread panicked");
+    assert!(
+        second_client_served.load(Ordering::SeqCst),
+        "server should have served the second client"
+    );
 }

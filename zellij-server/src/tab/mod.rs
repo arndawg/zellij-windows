@@ -2614,7 +2614,6 @@ impl Tab {
         if floating_visible && floating_active.is_none() {
             self.floating_panes.focus_first_pane_if_client_not_focused(client_id);
             floating_active = self.floating_panes.get_active_pane_id(client_id);
-            }
         }
         let pane_id = if floating_visible {
             floating_active

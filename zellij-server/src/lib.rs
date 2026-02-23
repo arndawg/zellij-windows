@@ -675,6 +675,17 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
 
     envs::set_zellij("0".to_string());
 
+    // Eagerly create the session info cache directory so that `list-sessions`
+    // can discover this session immediately, rather than waiting for the
+    // background job's first serialization cycle.
+    if let Some(session_name) = socket_path.file_name().and_then(|n| n.to_str()) {
+        let session_info_dir =
+            zellij_utils::consts::session_info_folder_for_session(session_name);
+        if let Err(e) = std::fs::create_dir_all(&session_info_dir) {
+            log::warn!("Failed to create session info cache dir: {:?}", e);
+        }
+    }
+
     let (to_server, server_receiver): ChannelWithContext<ServerInstruction> = channels::bounded(50);
     let to_server = SenderWithContext::new(to_server);
     let session_data: Arc<RwLock<Option<SessionMetaData>>> = Arc::new(RwLock::new(None));
@@ -720,14 +731,44 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                 // On Windows, we need a second pipe for server→client messages because
                 // synchronous named pipes deadlock when using DuplicateHandle for
                 // concurrent read/write on the same pipe instance.
+                // On Windows, a dedicated thread continuously accepts reverse-pipe
+                // connections and feeds them through a channel. The main listener
+                // loop receives from this channel with a timeout after each main
+                // pipe accept. This avoids permanently wedging the listener when
+                // a probe (e.g. list-sessions) connects to the main pipe only.
                 #[cfg(windows)]
-                let reverse_listener = ListenerOptions::new()
-                    .name(
-                        zellij_utils::ipc::path_to_ipc_name_reverse(socket_path.as_path())
+                let reverse_rx = {
+                    let reverse_listener = ListenerOptions::new()
+                        .name(
+                            zellij_utils::ipc::path_to_ipc_name_reverse(
+                                socket_path.as_path(),
+                            )
                             .unwrap(),
-                    )
-                    .create_sync()
-                    .unwrap();
+                        )
+                        .create_sync()
+                        .unwrap();
+                    let (tx, rx) =
+                        std::sync::mpsc::channel::<interprocess::local_socket::Stream>();
+                    std::thread::Builder::new()
+                        .name("reverse_pipe_acceptor".to_string())
+                        .spawn(move || {
+                            for stream in reverse_listener.incoming() {
+                                match stream {
+                                    Ok(s) => {
+                                        if tx.send(s).is_err() {
+                                            break;
+                                        }
+                                    },
+                                    Err(e) => {
+                                        log::warn!("Reverse pipe accept error: {:?}", e);
+                                        break;
+                                    },
+                                }
+                            }
+                        })
+                        .unwrap();
+                    rx
+                };
                 for stream in listener.incoming() {
                     match stream {
                         Ok(stream) => {
@@ -737,15 +778,33 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                             let receiver = os_input.new_client(client_id, stream).unwrap();
                             #[cfg(windows)]
                             let receiver = {
-                                // Accept the reverse connection for server→client
-                                let reverse_stream = reverse_listener.accept().unwrap();
-                                os_input
-                                    .new_client_with_reverse_stream(
-                                        client_id,
-                                        stream,
-                                        reverse_stream,
-                                    )
-                                    .unwrap()
+                                match reverse_rx
+                                    .recv_timeout(std::time::Duration::from_secs(5))
+                                {
+                                    Ok(reverse_stream) => {
+                                        os_input
+                                            .new_client_with_reverse_stream(
+                                                client_id,
+                                                stream,
+                                                reverse_stream,
+                                            )
+                                            .unwrap()
+                                    },
+                                    Err(_) => {
+                                        // Timed out — likely a probe from list-sessions
+                                        // that only connected to the main pipe.
+                                        log::warn!(
+                                            "Reverse pipe accept timed out for client {}, \
+                                             likely a probe connection",
+                                            client_id
+                                        );
+                                        session_state
+                                            .write()
+                                            .unwrap()
+                                            .remove_client(client_id);
+                                        continue;
+                                    },
+                                }
                             };
                             let session_data = session_data.clone();
                             let session_state = session_state.clone();
