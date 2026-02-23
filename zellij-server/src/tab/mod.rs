@@ -2605,10 +2605,20 @@ impl Tab {
 
         self.clear_search(client_id);
         self.mouse_help_text_visible.clear();
-        let pane_id = if self.floating_panes.panes_are_visible() {
-            self.floating_panes
-                .get_active_pane_id(client_id)
-                .or_else(|| self.tiled_panes.get_active_pane_id(client_id))
+        let floating_visible = self.floating_panes.panes_are_visible();
+        let mut floating_active = self.floating_panes.get_active_pane_id(client_id);
+        let tiled_active = self.tiled_panes.get_active_pane_id(client_id);
+        // Fix race condition: on Windows, the client may connect before plugin
+        // floating panes finish loading. When that happens, the floating pane is
+        // never focused for the client. Auto-focus it now.
+        if floating_visible && floating_active.is_none() {
+            self.floating_panes.focus_first_pane_if_client_not_focused(client_id);
+            floating_active = self.floating_panes.get_active_pane_id(client_id);
+            }
+        }
+        let pane_id = if floating_visible {
+            floating_active
+                .or(tiled_active)
                 .ok_or_else(|| {
                     anyhow!(format!(
                         "failed to find active pane id for client {client_id}"

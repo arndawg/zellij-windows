@@ -200,6 +200,19 @@ pub fn get_sessions_sorted_by_mtime() -> anyhow::Result<Vec<String>> {
 
 fn assert_socket(name: &str) -> bool {
     let path = &*ZELLIJ_SOCK_DIR.join(name);
+    let name_owned = name.to_owned();
+    let path_owned = path.to_path_buf();
+    // Probe with a timeout to avoid blocking forever when the server is
+    // gone but the named pipe or socket is still connectable (common on Windows).
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = assert_socket_inner(&name_owned, &path_owned);
+        let _ = tx.send(result);
+    });
+    rx.recv_timeout(Duration::from_secs(3)).unwrap_or(false)
+}
+
+fn assert_socket_inner(name: &str, path: &std::path::Path) -> bool {
     let fs_name = match path_to_ipc_name(path) {
         Ok(name) => name,
         Err(_) => return false,

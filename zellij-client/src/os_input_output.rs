@@ -150,6 +150,26 @@ impl ClientOsApi for ClientOsInputOutput {
     }
     fn set_raw_mode(&mut self) {
         crossterm::terminal::enable_raw_mode().expect("could not enable raw mode");
+        // On Windows, crossterm's enable_raw_mode() does not set
+        // ENABLE_VIRTUAL_TERMINAL_INPUT on stdin. Without this flag,
+        // the console does not pass the Esc key (0x1b) through ReadFile.
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::System::Console::{
+                GetConsoleMode, SetConsoleMode, ENABLE_VIRTUAL_TERMINAL_INPUT,
+            };
+            let handle = std::io::stdin().as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+            let mut mode: u32 = 0;
+            unsafe {
+                if GetConsoleMode(handle, &mut mode) != 0 {
+                    let new_mode = mode | ENABLE_VIRTUAL_TERMINAL_INPUT;
+                    if SetConsoleMode(handle, new_mode) == 0 {
+                        log::warn!("Failed to set ENABLE_VIRTUAL_TERMINAL_INPUT on stdin");
+                    }
+                }
+            }
+        }
     }
     fn unset_raw_mode(&self) -> Result<(), std::io::Error> {
         crossterm::terminal::disable_raw_mode()

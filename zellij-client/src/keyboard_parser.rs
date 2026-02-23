@@ -1777,3 +1777,104 @@ pub fn can_parse_keys_with_multiple_modifiers() {
         "Can parse a bare 'F4 (superernate)' keypress with all modifiers"
     );
 }
+
+/// Verify that bare ESC (0x1b alone) is NOT parsed by KittyKeyboardParser.
+/// This byte falls through to the explicit bare-ESC handler in stdin_handler.rs
+/// or to the termwiz fallback parser.
+#[test]
+pub fn bare_esc_byte_returns_none() {
+    let bare_esc: &[u8] = &[0x1b];
+    assert_eq!(
+        KittyKeyboardParser::new().parse(bare_esc),
+        None,
+        "Bare ESC byte (0x1b) should NOT be parsed by Kitty parser"
+    );
+}
+
+/// Verify that Kitty-encoded ESC (\x1b[27u) IS parsed correctly.
+#[test]
+pub fn kitty_encoded_esc_is_parsed() {
+    use zellij_utils::data::BareKey;
+    let kitty_esc = "\u{1b}[27u";
+    assert_eq!(
+        KittyKeyboardParser::new().parse(kitty_esc.as_bytes()),
+        Some(KeyWithModifier::new(BareKey::Esc)),
+        "Kitty-encoded ESC (\\x1b[27u) should be parsed as BareKey::Esc"
+    );
+}
+
+/// Verify that termwiz correctly produces Escape for bare 0x1b with maybe_more=false.
+#[test]
+pub fn termwiz_bare_esc_produces_escape_event() {
+    use termwiz::input::{InputEvent, InputParser, KeyCode, KeyEvent, Modifiers};
+    let mut parser = InputParser::new();
+    let events = parser.parse_as_vec(&[0x1b], false);
+    assert!(
+        !events.is_empty(),
+        "termwiz should produce at least one event for bare ESC with maybe_more=false"
+    );
+    match &events[0] {
+        InputEvent::Key(KeyEvent {
+            key: KeyCode::Escape,
+            modifiers: Modifiers::NONE,
+        }) => {},
+        other => panic!(
+            "expected Escape key event, got: {:?}",
+            other
+        ),
+    }
+}
+
+/// Verify that termwiz produces Escape even after processing other input first.
+/// This simulates the real scenario where the parser has state from previous reads.
+#[test]
+pub fn termwiz_bare_esc_after_prior_input() {
+    use termwiz::input::{InputEvent, InputParser, KeyCode, KeyEvent, Modifiers};
+    let mut parser = InputParser::new();
+    // Simulate prior input (like typing 'a', 'b')
+    let _ = parser.parse_as_vec(b"ab", false);
+    // Now parse bare ESC
+    let events = parser.parse_as_vec(&[0x1b], false);
+    assert!(
+        !events.is_empty(),
+        "termwiz should produce Escape event even after prior input"
+    );
+    match &events[0] {
+        InputEvent::Key(KeyEvent {
+            key: KeyCode::Escape,
+            modifiers: Modifiers::NONE,
+        }) => {},
+        other => panic!(
+            "expected Escape key event after prior input, got: {:?}",
+            other
+        ),
+    }
+}
+
+/// Verify that termwiz produces Escape after processing ANSI-like sequences.
+/// This simulates startup query responses bleeding into the normal input path.
+#[test]
+pub fn termwiz_bare_esc_after_ansi_fragment() {
+    use termwiz::input::{InputEvent, InputParser, KeyCode, KeyEvent, Modifiers};
+    let mut parser = InputParser::new();
+    // Simulate a partial ANSI response that might leak from startup queries
+    let _ = parser.parse_as_vec(b"\x1b[14;800;600t", false);
+    // Now parse bare ESC
+    let events = parser.parse_as_vec(&[0x1b], false);
+    assert!(
+        !events.is_empty(),
+        "termwiz should produce Escape event even after ANSI fragments"
+    );
+    // The first event should be Escape
+    let has_esc = events.iter().any(|e| matches!(e,
+        InputEvent::Key(KeyEvent {
+            key: KeyCode::Escape,
+            modifiers: Modifiers::NONE,
+        })
+    ));
+    assert!(
+        has_esc,
+        "expected at least one Escape key event after ANSI fragments, got: {:?}",
+        events
+    );
+}

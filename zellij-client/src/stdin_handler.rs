@@ -87,6 +87,25 @@ pub(crate) fn stdin_loop(
                 }
                 current_buffer.append(&mut buf.to_vec());
 
+                // Handle bare ESC (0x1b alone) explicitly. When the terminal
+                // does not use the Kitty keyboard protocol for the Escape key,
+                // it sends a single 0x1b byte. The KittyKeyboardParser returns
+                // None for this (it's an incomplete sequence), and on Windows
+                // the termwiz fallback may not reliably produce an Escape event.
+                if buf.as_slice() == [0x1b] {
+                    log::debug!("stdin: bare ESC byte detected, emitting Esc key");
+                    send_input_instructions
+                        .send(InputInstruction::KeyEvent(
+                            InputEvent::Key(termwiz::input::KeyEvent {
+                                key: termwiz::input::KeyCode::Escape,
+                                modifiers: termwiz::input::Modifiers::NONE,
+                            }),
+                            current_buffer.drain(..).collect(),
+                        ))
+                        .unwrap();
+                    continue;
+                }
+
                 if !explicitly_disable_kitty_keyboard_protocol {
                     // first we try to parse with the KittyKeyboardParser
                     // if we fail, we try to parse normally
