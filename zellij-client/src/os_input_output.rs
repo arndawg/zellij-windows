@@ -172,7 +172,30 @@ impl ClientOsApi for ClientOsInputOutput {
         }
     }
     fn unset_raw_mode(&self) -> Result<(), std::io::Error> {
-        crossterm::terminal::disable_raw_mode()
+        crossterm::terminal::disable_raw_mode()?;
+        // On Windows, crossterm's disable_raw_mode() only adds back the
+        // LINE_INPUT|ECHO_INPUT|PROCESSED_INPUT flags — it does NOT clear
+        // ENABLE_VIRTUAL_TERMINAL_INPUT that we set in set_raw_mode().
+        // If left enabled, the parent shell receives ANSI escape sequences
+        // (e.g. ^[[A for arrow keys) instead of native virtual key events.
+        #[cfg(windows)]
+        {
+            use std::os::windows::io::AsRawHandle;
+            use windows_sys::Win32::System::Console::{
+                GetConsoleMode, SetConsoleMode, ENABLE_VIRTUAL_TERMINAL_INPUT,
+            };
+            let handle = std::io::stdin().as_raw_handle() as windows_sys::Win32::Foundation::HANDLE;
+            let mut mode: u32 = 0;
+            unsafe {
+                if GetConsoleMode(handle, &mut mode) != 0 {
+                    let new_mode = mode & !ENABLE_VIRTUAL_TERMINAL_INPUT;
+                    if new_mode != mode {
+                        SetConsoleMode(handle, new_mode);
+                    }
+                }
+            }
+        }
+        Ok(())
     }
     fn box_clone(&self) -> Box<dyn ClientOsApi> {
         Box::new((*self).clone())
