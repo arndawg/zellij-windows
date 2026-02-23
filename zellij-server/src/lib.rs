@@ -717,12 +717,36 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
                 // It is not guaranteed that all platforms allow setting the sticky bit on sockets!
                 #[cfg(unix)]
                 drop(set_permissions(&socket_path, 0o1700));
+                // On Windows, we need a second pipe for server→client messages because
+                // synchronous named pipes deadlock when using DuplicateHandle for
+                // concurrent read/write on the same pipe instance.
+                #[cfg(windows)]
+                let reverse_listener = ListenerOptions::new()
+                    .name(
+                        zellij_utils::ipc::path_to_ipc_name_reverse(socket_path.as_path())
+                            .unwrap(),
+                    )
+                    .create_sync()
+                    .unwrap();
                 for stream in listener.incoming() {
                     match stream {
                         Ok(stream) => {
                             let mut os_input = os_input.clone();
                             let client_id = session_state.write().unwrap().new_client();
+                            #[cfg(not(windows))]
                             let receiver = os_input.new_client(client_id, stream).unwrap();
+                            #[cfg(windows)]
+                            let receiver = {
+                                // Accept the reverse connection for server→client
+                                let reverse_stream = reverse_listener.accept().unwrap();
+                                os_input
+                                    .new_client_with_reverse_stream(
+                                        client_id,
+                                        stream,
+                                        reverse_stream,
+                                    )
+                                    .unwrap()
+                            };
                             let session_data = session_data.clone();
                             let session_state = session_state.clone();
                             let to_server = to_server.clone();

@@ -298,6 +298,19 @@ pub trait ServerOsApi: Send + Sync {
         client_id: ClientId,
         stream: LocalSocketStream,
     ) -> Result<IpcReceiverWithContext<ClientToServerMsg>>;
+    /// On Windows, uses a separate pipe for server→client messages to avoid
+    /// deadlock from concurrent read/write on DuplicateHandle'd pipe handles.
+    #[cfg(windows)]
+    fn new_client_with_reverse_stream(
+        &mut self,
+        client_id: ClientId,
+        stream: LocalSocketStream,
+        reverse_stream: LocalSocketStream,
+    ) -> Result<IpcReceiverWithContext<ClientToServerMsg>> {
+        // Default: fall back to single-stream (for test mocks)
+        let _ = reverse_stream;
+        self.new_client(client_id, stream)
+    }
     fn remove_client(&mut self, client_id: ClientId) -> Result<()>;
     fn load_palette(&self) -> Palette;
     /// Returns the current working directory for a given pid
@@ -413,6 +426,28 @@ impl ServerOsApi for ServerOsInputOutput {
     ) -> Result<IpcReceiverWithContext<ClientToServerMsg>> {
         let receiver = IpcReceiverWithContext::new(stream);
         let sender = ClientSender::new(client_id, receiver.get_sender());
+        self.client_senders
+            .lock()
+            .to_anyhow()
+            .with_context(|| format!("failed to create new client {client_id}"))?
+            .insert(client_id, sender);
+        Ok(receiver)
+    }
+
+    #[cfg(windows)]
+    fn new_client_with_reverse_stream(
+        &mut self,
+        client_id: ClientId,
+        stream: LocalSocketStream,
+        reverse_stream: LocalSocketStream,
+    ) -> Result<IpcReceiverWithContext<ClientToServerMsg>> {
+        // Use the main stream only for reading (client→server)
+        let receiver = IpcReceiverWithContext::new(stream);
+        // Use the reverse stream only for writing (server→client), no DuplicateHandle
+        let sender = ClientSender::new(
+            client_id,
+            IpcSenderWithContext::new(reverse_stream),
+        );
         self.client_senders
             .lock()
             .to_anyhow()

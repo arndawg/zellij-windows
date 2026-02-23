@@ -247,6 +247,15 @@ fn session_lifecycle_server_ipc_round_trip() {
     let connected = connect_result.is_ok();
 
     if let Ok(stream) = connect_result {
+        // On Windows, the server expects a second connection on the reverse pipe
+        // for server→client messages. Keep it alive until we're done with the main pipe.
+        #[cfg(windows)]
+        let _reverse_stream = {
+            let reverse_name = zellij_utils::ipc::path_to_ipc_name_reverse(&socket_path)
+                .expect("path_to_ipc_name_reverse should succeed");
+            LocalSocketStream::connect(reverse_name).ok()
+        };
+
         // Send a ConnStatus query to verify the server is alive
         use zellij_utils::ipc::{IpcSenderWithContext, ClientToServerMsg};
         let mut sender: IpcSenderWithContext<ClientToServerMsg> =
@@ -260,11 +269,20 @@ fn session_lifecycle_server_ipc_round_trip() {
     let status = server_proc.wait();
     eprintln!("Server exit status: {:?}", status);
 
-    // Read server stderr for diagnostic info
-    if let Some(mut stderr_pipe) = server_proc.stderr.take() {
+    // Read server stderr for diagnostic info (with timeout to avoid hanging
+    // if child processes inherited the stderr handle)
+    if let Some(stderr_pipe) = server_proc.stderr.take() {
         use std::io::Read;
-        let mut stderr_output = String::new();
-        let _ = stderr_pipe.read_to_string(&mut stderr_output);
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut pipe = stderr_pipe;
+            let mut output = String::new();
+            let _ = pipe.read_to_string(&mut output);
+            let _ = tx.send(output);
+        });
+        let stderr_output = rx
+            .recv_timeout(Duration::from_secs(5))
+            .unwrap_or_default();
         if !stderr_output.is_empty() {
             eprintln!("Server stderr: {}", &stderr_output[..stderr_output.len().min(2000)]);
         }

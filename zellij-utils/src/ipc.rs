@@ -42,24 +42,45 @@ pub fn path_to_ipc_name(path: &Path) -> io::Result<Name<'_>> {
     }
     #[cfg(windows)]
     {
-        use interprocess::local_socket::GenericNamespaced;
-        let components: Vec<&str> = path
-            .components()
-            .filter_map(|c| c.as_os_str().to_str())
-            .collect();
-        let name = if components.len() >= 2 {
-            let len = components.len();
-            format!("zellij-{}-{}", components[len - 2], components[len - 1])
-        } else {
-            format!(
-                "zellij-{}",
-                path.display()
-                    .to_string()
-                    .replace(['\\', '/', ':'], "-")
-            )
-        };
-        name.to_ns_name::<GenericNamespaced>()
+        path_to_windows_pipe_name(path, "")
     }
+}
+
+/// On Windows, returns a second named pipe name for the server→client direction.
+///
+/// Windows named pipes in synchronous mode deadlock when using DuplicateHandle for
+/// concurrent read/write on the same pipe instance. To work around this, we use two
+/// separate pipes: one for client→server (main) and one for server→client (reverse).
+#[cfg(windows)]
+pub fn path_to_ipc_name_reverse(path: &Path) -> io::Result<Name<'static>> {
+    path_to_windows_pipe_name(path, "-srv")
+}
+
+#[cfg(windows)]
+fn path_to_windows_pipe_name(path: &Path, suffix: &str) -> io::Result<Name<'static>> {
+    use interprocess::local_socket::GenericNamespaced;
+    let components: Vec<&str> = path
+        .components()
+        .filter_map(|c| c.as_os_str().to_str())
+        .collect();
+    let name = if components.len() >= 2 {
+        let len = components.len();
+        format!(
+            "zellij-{}-{}{}",
+            components[len - 2],
+            components[len - 1],
+            suffix
+        )
+    } else {
+        format!(
+            "zellij-{}{}",
+            path.display()
+                .to_string()
+                .replace(['\\', '/', ':'], "-"),
+            suffix
+        )
+    };
+    name.to_ns_name::<GenericNamespaced>()
 }
 
 type SessionId = u64;

@@ -271,10 +271,38 @@ impl ClientOsApi for ClientOsInputOutput {
                 },
             }
         }
-        let sender = IpcSenderWithContext::new(socket);
-        let receiver = sender.get_receiver();
-        *self.send_instructions_to_server.lock().unwrap() = Some(sender);
-        *self.receive_instructions_from_server.lock().unwrap() = Some(receiver);
+        #[cfg(not(windows))]
+        {
+            let sender = IpcSenderWithContext::new(socket);
+            let receiver = sender.get_receiver();
+            *self.send_instructions_to_server.lock().unwrap() = Some(sender);
+            *self.receive_instructions_from_server.lock().unwrap() = Some(receiver);
+        }
+        #[cfg(windows)]
+        {
+            // On Windows, use a separate pipe for server→client to avoid deadlock
+            // from concurrent read/write on DuplicateHandle'd pipe handles.
+            let reverse_name = zellij_utils::ipc::path_to_ipc_name_reverse(path)
+                .expect("failed to convert path to reverse socket name");
+            let reverse_socket;
+            loop {
+                match LocalSocketStream::connect(reverse_name.clone()) {
+                    Ok(sock) => {
+                        reverse_socket = sock;
+                        break;
+                    },
+                    Err(_) => {
+                        std::thread::sleep(std::time::Duration::from_millis(50));
+                    },
+                }
+            }
+            // Main pipe: client→server only (no cloning)
+            let sender = IpcSenderWithContext::new(socket);
+            // Reverse pipe: server→client only (no cloning)
+            let receiver = IpcReceiverWithContext::new(reverse_socket);
+            *self.send_instructions_to_server.lock().unwrap() = Some(sender);
+            *self.receive_instructions_from_server.lock().unwrap() = Some(receiver);
+        }
     }
     fn load_palette(&self) -> Palette {
         // this was removed because termbg doesn't release stdin in certain scenarios (we know of
