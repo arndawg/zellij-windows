@@ -111,6 +111,9 @@ include_dir = { version = "0.7.3", default-features = false }
 sha2 = { version = "0.10", default-features = false }
 zellij-utils = { path = "zellij-utils/", version = "0.44.0" }
 
+[patch.crates-io]
+portable-pty = { path = "portable-pty-patch" }
+
 [profile.dev-opt]
 inherits = "dev"
 
