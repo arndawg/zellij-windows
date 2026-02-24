@@ -101,6 +101,16 @@ pub trait MasterPty: Downcast + Send {
     /// It is invalid to take the writer more than once.
     fn take_writer(&self) -> Result<Box<dyn std::io::Write + Send>, Error>;
 
+    /// Spawn an additional process inside this PTY session.
+    /// Only supported on Windows ConPTY; returns an error on other backends.
+    #[cfg(windows)]
+    fn spawn_command_in_pty(
+        &self,
+        _cmd: CommandBuilder,
+    ) -> Result<Box<dyn Child + Send + Sync>, Error> {
+        Err(anyhow::anyhow!("spawn_command_in_pty not supported"))
+    }
+
     /// If applicable to the type of the tty, return the local process id
     /// of the process group or session leader
     #[cfg(unix)]

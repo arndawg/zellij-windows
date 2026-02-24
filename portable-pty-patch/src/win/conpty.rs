@@ -136,6 +136,15 @@ impl MasterPty for ConPtyMasterPty {
                 .ok_or_else(|| anyhow::anyhow!("writer already taken"))?,
         ))
     }
+
+    fn spawn_command_in_pty(
+        &self,
+        cmd: CommandBuilder,
+    ) -> anyhow::Result<Box<dyn Child + Send + Sync>> {
+        let inner = self.inner.lock().unwrap();
+        let child = inner.con.spawn_command(cmd)?;
+        Ok(Box::new(child))
+    }
 }
 
 impl SlavePty for ConPtySlavePty {

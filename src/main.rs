@@ -15,6 +15,63 @@ use zellij_utils::{
 };
 
 fn main() {
+    // ConPTY Ctrl+C helper: spawned inside a ConPTY to detect whether the
+    // 0x03 signal was consumed by a program reading stdin. After 100ms,
+    // peeks the console input buffer. If the 0x03 KEY event is still there
+    // (no program consumed it), exits with code 42 to signal the server to
+    // terminate descendants. If consumed, exits with code 0 (do nothing).
+    #[cfg(windows)]
+    if std::env::args_os().any(|a| a == "--conpty-ctrl-c") {
+        unsafe {
+            use windows_sys::Win32::System::Console::*;
+
+            // Ignore CTRL_C for ourselves
+            SetConsoleCtrlHandler(None, 1);
+
+            // Wait for stdin readers to consume the 0x03 event
+            std::thread::sleep(std::time::Duration::from_millis(100));
+
+            // Open the console input buffer
+            const GENERIC_READ: u32 = 0x80000000;
+            const GENERIC_WRITE: u32 = 0x40000000;
+            let conin_name: [u16; 7] = [b'C' as u16, b'O' as u16, b'N' as u16,
+                b'I' as u16, b'N' as u16, b'$' as u16, 0];
+            let conin = windows_sys::Win32::Storage::FileSystem::CreateFileW(
+                conin_name.as_ptr(),
+                GENERIC_READ | GENERIC_WRITE,
+                windows_sys::Win32::Storage::FileSystem::FILE_SHARE_READ
+                    | windows_sys::Win32::Storage::FileSystem::FILE_SHARE_WRITE,
+                std::ptr::null(),
+                windows_sys::Win32::Storage::FileSystem::OPEN_EXISTING,
+                0,
+                std::ptr::null_mut(),
+            );
+
+            if conin != windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
+                let mut events: [INPUT_RECORD; 32] = std::mem::zeroed();
+                let mut count: u32 = 0;
+                PeekConsoleInputW(conin, events.as_mut_ptr(), 32, &mut count);
+                windows_sys::Win32::Foundation::CloseHandle(conin);
+
+                // Check if any pending event has the 0x03 (Ctrl+C) character
+                let ctrl_c_pending = (0..count as usize).any(|i| {
+                    events[i].EventType == KEY_EVENT as u16
+                        && events[i].Event.KeyEvent.uChar.UnicodeChar == 0x03
+                });
+
+                if ctrl_c_pending {
+                    // Signal not consumed — program doesn't read stdin
+                    std::process::exit(42);
+                }
+            } else {
+                // Can't peek — fall back to "unconsumed" to be safe
+                std::process::exit(42);
+            }
+        }
+        // Signal was consumed — program handles Ctrl+C itself
+        std::process::exit(0);
+    }
+
     configure_logger();
     create_config_and_cache_folders();
     let opts = CliArgs::parse();

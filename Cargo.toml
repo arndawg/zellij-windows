@@ -29,6 +29,9 @@ suggest = { workspace = true }
 thiserror = { workspace = true }
 isahc = { workspace = true }
 
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_Console", "Win32_Storage_FileSystem", "Win32_Foundation"] }
+
 [dev-dependencies]
 insta = { version = "1.6.0", features = ["backtrace"] }
 ssh2 = "0.9.1"

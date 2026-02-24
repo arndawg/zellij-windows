@@ -288,33 +288,63 @@ impl WindowsPtyBackend {
         match map.get_mut(&terminal_id) {
             Some(Some(handle)) => {
                 if buf == [0x03] {
-                    // Ctrl+C handling for Windows ConPTY. Two mechanisms:
+                    // Ctrl+C handling for Windows ConPTY.
                     //
-                    // 1. Write byte 0x03 to the ConPTY pipe — works when the
-                    //    shell is idle (ReadConsoleW processes it) and for
-                    //    programs that read stdin (e.g. node.js/Claude Code
-                    //    reads 0x03 and handles it as Ctrl+C gracefully).
+                    // GenerateConsoleCtrlEvent(CTRL_C_EVENT) is broken in ConPTY
+                    // on Windows 11 — it returns success but never delivers the
+                    // event. We use a multi-mechanism approach instead:
                     //
-                    // 2. Send a win32-input-mode encoded Ctrl+Break event
-                    //    when there are no child processes — works for
-                    //    built-in commands (dir /s, etc.) that run inside
-                    //    the shell itself. The CSI sequence is always parsed
-                    //    by conhost's VT input thread.
+                    // 1. Write 0x03 to the ConPTY pipe — works for idle prompt
+                    //    and programs that read stdin (Claude Code/node.js).
                     //
-                    // We intentionally do NOT use TerminateProcess here:
-                    // it would kill programs like Claude Code before they
-                    // can read the 0x03 byte and handle Ctrl+C gracefully.
-                    // TerminateProcess is reserved for send_sigint() which
-                    // is only called programmatically (e.g. closing panes).
+                    // 2. If no child processes (built-in command like dir /s):
+                    //    send Ctrl+Break VT sequence, which conhost always parses.
+                    //
+                    // 3. If child processes exist: spawn a detection helper inside
+                    //    the ConPTY that waits 100ms, then peeks the console input
+                    //    buffer. If the 0x03 event was consumed (a program read it),
+                    //    do nothing — the program handles Ctrl+C itself (e.g. Claude
+                    //    Code). If unconsumed, terminate descendants (e.g. ping).
                     if let Some(writer) = handle.writer.as_mut() {
                         let _ = writer.write_all(b"\x03");
                         let _ = writer.flush();
                     }
                     let shell_pid = handle.child_pid;
-                    // Drop the lock before the potentially slow process walk
-                    drop(map);
 
-                    if !Self::has_descendants(shell_pid) {
+                    if Self::has_descendants(shell_pid) {
+                        // Spawn detection helper inside ConPTY
+                        let helper = Self::spawn_ctrl_c_helper(&handle.master);
+                        drop(map);
+
+                        match helper {
+                            Some(mut child) => {
+                                // Wait for helper in background thread
+                                thread::spawn(move || {
+                                    match child.wait() {
+                                        Ok(status) if status.exit_code() == 42 => {
+                                            // 0x03 not consumed — terminate
+                                            Self::terminate_descendants(shell_pid);
+                                        },
+                                        Ok(_) => {
+                                            // 0x03 was consumed — program handles it
+                                        },
+                                        Err(_) => {
+                                            // Helper failed — terminate as fallback
+                                            Self::terminate_descendants(shell_pid);
+                                        },
+                                    }
+                                });
+                            },
+                            None => {
+                                // Helper spawn failed — fall back to delayed terminate
+                                thread::spawn(move || {
+                                    thread::sleep(std::time::Duration::from_millis(100));
+                                    Self::terminate_descendants(shell_pid);
+                                });
+                            },
+                        }
+                    } else {
+                        drop(map);
                         // No child processes — likely a built-in command.
                         // Send CTRL_BREAK_EVENT via win32-input-mode VT sequence.
                         // Format: CSI Vk;Sc;Uc;Kd;Cs;Rc _
@@ -399,11 +429,30 @@ impl WindowsPtyBackend {
     }
 
     pub fn send_sigint(&self, pid: u32) -> Result<()> {
-        // Terminate descendant processes of the shell. This is the Windows
-        // equivalent of sending SIGINT: GenerateConsoleCtrlEvent is broken
-        // in ConPTY sessions, so we directly terminate the child processes.
+        // Terminate descendant processes of the shell. This is used for
+        // programmatic signals (closing panes, plugin signals) where we
+        // need immediate termination rather than graceful Ctrl+C.
         Self::terminate_descendants(pid);
         Ok(())
+    }
+
+    /// Spawn a short-lived helper process inside the ConPTY that detects
+    /// whether the 0x03 event was consumed by a stdin-reading program.
+    /// Returns None if spawning failed.
+    fn spawn_ctrl_c_helper(
+        master: &Box<dyn portable_pty::MasterPty + Send>,
+    ) -> Option<Box<dyn portable_pty::Child + Send + Sync>> {
+        let exe = std::env::current_exe()
+            .unwrap_or_else(|_| std::path::PathBuf::from("zellij.exe"));
+        let mut cmd = portable_pty::CommandBuilder::new(&exe);
+        cmd.arg("--conpty-ctrl-c");
+        match master.spawn_command_in_pty(cmd) {
+            Ok(child) => Some(child),
+            Err(e) => {
+                log::warn!("Failed to spawn Ctrl+C helper: {}", e);
+                None
+            },
+        }
     }
 
     /// Find all descendant PIDs of `parent_pid` using the Toolhelp API.
