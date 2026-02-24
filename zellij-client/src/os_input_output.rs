@@ -223,8 +223,34 @@ impl ClientOsApi for ClientOsInputOutput {
             None => {
                 let stdin = std::io::stdin();
                 let mut stdin = stdin.lock();
-                let buffer = stdin.fill_buf().unwrap();
+                let buffer = match stdin.fill_buf() {
+                    Ok(buf) => buf,
+                    Err(_e) => {
+                        // On Windows, Ctrl-C interrupts ReadFile even with
+                        // ENABLE_PROCESSED_INPUT disabled. Synthesize byte 0x03
+                        // so it flows to the active terminal pane.
+                        #[cfg(windows)]
+                        {
+                            if crate::os_input_output_windows::CTRL_C_PRESSED
+                                .swap(false, std::sync::atomic::Ordering::SeqCst)
+                            {
+                                return Ok(vec![0x03]);
+                            }
+                        }
+                        return Err("Failed to read from STDIN");
+                    },
+                };
                 let length = buffer.len();
+                // On Windows, ReadFile can return 0 bytes when interrupted by
+                // CTRL_C_EVENT. Check the flag and synthesize 0x03.
+                #[cfg(windows)]
+                if length == 0 {
+                    if crate::os_input_output_windows::CTRL_C_PRESSED
+                        .swap(false, std::sync::atomic::Ordering::SeqCst)
+                    {
+                        return Ok(vec![0x03]);
+                    }
+                }
                 let read_bytes = Vec::from(buffer);
                 stdin.consume(length);
 

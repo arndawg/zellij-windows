@@ -7,6 +7,14 @@ use std::sync::mpsc as std_mpsc;
 use std::thread;
 use std::time::Duration;
 
+/// Flag set by the console ctrl handler when Ctrl-C is pressed.
+/// On Windows, Ctrl-C should be forwarded to the active terminal pane
+/// (as byte 0x03) rather than treated as a quit signal. The stdin read
+/// loop checks this flag to synthesize the byte when ReadFile is
+/// interrupted by the CTRL_C_EVENT.
+pub static CTRL_C_PRESSED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 /// Async signal listener for Windows.
 ///
 /// Uses `tokio::signal::windows` for Ctrl-C / Ctrl-Break, and polls
@@ -56,7 +64,13 @@ impl AsyncSignalListener {
 impl crate::os_input_output::AsyncSignals for AsyncSignalListener {
     async fn recv(&mut self) -> Option<SignalEvent> {
         tokio::select! {
-            result = self.ctrl_c.recv() => result.map(|_| SignalEvent::Quit),
+            _result = self.ctrl_c.recv() => {
+                // Ctrl-C should be forwarded to terminal panes, not trigger quit.
+                // Set the flag so the stdin loop can synthesize byte 0x03.
+                CTRL_C_PRESSED.store(true, std::sync::atomic::Ordering::SeqCst);
+                // Return None to continue the select loop (no SignalEvent emitted)
+                None
+            },
             result = self.ctrl_break.recv() => result.map(|_| SignalEvent::Quit),
             result = self.resize_rx.recv() => result.map(|_| SignalEvent::Resize),
         }
@@ -117,7 +131,15 @@ impl BlockingSignalIterator {
 
                 unsafe extern "system" fn handler(ctrl_type: u32) -> i32 {
                     match ctrl_type {
-                        CTRL_C_EVENT | CTRL_BREAK_EVENT => {
+                        CTRL_C_EVENT => {
+                            // Don't quit — forward Ctrl-C to the active terminal pane.
+                            // Set CTRL_C_PRESSED so the stdin loop can synthesize byte 0x03
+                            // (ReadFile is interrupted by CTRL_C_EVENT on Windows and won't
+                            // deliver the byte itself).
+                            CTRL_C_PRESSED.store(true, std::sync::atomic::Ordering::SeqCst);
+                            1 // handled — prevent default termination
+                        },
+                        CTRL_BREAK_EVENT => {
                             QUIT_FLAG.store(true, std::sync::atomic::Ordering::SeqCst);
                             1 // handled
                         },

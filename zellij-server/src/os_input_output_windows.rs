@@ -15,6 +15,32 @@ use zellij_utils::{errors::prelude::*, input::command::RunCommand};
 
 pub use async_trait::async_trait;
 
+/// Spawn a short-lived helper process that delivers CTRL_C_EVENT to the console
+/// that `child_pid` is attached to (the ConPTY virtual console).
+///
+/// The helper is a DETACHED_PROCESS (no console of its own) so it can freely
+/// call `AttachConsole(child_pid)` without affecting the server.  It then calls
+/// `GenerateConsoleCtrlEvent(CTRL_C_EVENT, 0)` and exits.
+fn spawn_ctrl_c_helper(child_pid: u32) {
+    use std::os::windows::process::CommandExt;
+    const DETACHED_PROCESS: u32 = 0x00000008;
+
+    match std::env::current_exe() {
+        Ok(exe) => {
+            if let Err(e) = std::process::Command::new(exe)
+                .args(["--_send-ctrl-c", &child_pid.to_string()])
+                .creation_flags(DETACHED_PROCESS)
+                .spawn()
+            {
+                log::warn!("Failed to spawn Ctrl-C helper for pid {}: {}", child_pid, e);
+            }
+        },
+        Err(e) => {
+            log::warn!("Failed to get current exe path for Ctrl-C helper: {}", e);
+        },
+    }
+}
+
 /// Wraps a `portable-pty` reader, bridging blocking I/O to async via a channel.
 ///
 /// A background thread reads from the PTY master in a loop and sends chunks
@@ -277,6 +303,21 @@ impl WindowsPtyBackend {
 
         match map.get_mut(&terminal_id) {
             Some(Some(handle)) => {
+                // ConPTY does not generate CTRL_C_EVENT when byte 0x03 is written
+                // to the input pipe — it only places the byte in the child's input
+                // buffer.  That works at a prompt (cmd.exe reads it) but does NOT
+                // interrupt a running command (e.g. `dir /s`), which requires an
+                // asynchronous CTRL_C_EVENT signal.
+                //
+                // To deliver the signal we spawn a short-lived helper process
+                // (DETACHED_PROCESS) that attaches to the child's console and calls
+                // GenerateConsoleCtrlEvent.  We also still write the raw byte so
+                // that programs in raw-input mode (ENABLE_PROCESSED_INPUT off) see
+                // 0x03 in their input stream.
+                if buf == [0x03] {
+                    spawn_ctrl_c_helper(handle.child_pid);
+                }
+
                 if let Some(writer) = handle.writer.as_mut() {
                     writer
                         .write(buf)
@@ -342,15 +383,9 @@ impl WindowsPtyBackend {
     }
 
     pub fn send_sigint(&self, pid: u32) -> Result<()> {
-        // Try to send Ctrl+C via GenerateConsoleCtrlEvent
-        use windows_sys::Win32::System::Console::{GenerateConsoleCtrlEvent, CTRL_C_EVENT};
-        unsafe {
-            if GenerateConsoleCtrlEvent(CTRL_C_EVENT, pid) == 0 {
-                // If that fails, fall back to kill
-                log::warn!("GenerateConsoleCtrlEvent failed for pid {}, falling back to kill", pid);
-                return self.kill(pid);
-            }
-        }
+        // Use the helper-process approach to deliver CTRL_C_EVENT to the
+        // child's ConPTY console without disturbing the server's own console.
+        spawn_ctrl_c_helper(pid);
         Ok(())
     }
 

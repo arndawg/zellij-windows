@@ -15,6 +15,21 @@ use zellij_utils::{
 };
 
 fn main() {
+    // Hidden internal flag: deliver CTRL_C_EVENT to a child process's console.
+    // Invoked as `zellij --_send-ctrl-c <pid>` by the server via a helper process
+    // that is DETACHED from the server's console, so FreeConsole/AttachConsole
+    // only affects this short-lived helper, not the multi-threaded server.
+    #[cfg(windows)]
+    {
+        let args: Vec<String> = std::env::args().collect();
+        if args.len() == 3 && args[1] == "--_send-ctrl-c" {
+            if let Ok(pid) = args[2].parse::<u32>() {
+                win_send_ctrl_c(pid);
+            }
+            std::process::exit(0);
+        }
+    }
+
     configure_logger();
     create_config_and_cache_folders();
     let opts = CliArgs::parse();
@@ -410,5 +425,45 @@ fn main() {
         }
     } else {
         commands::start_client(opts);
+    }
+}
+
+/// Deliver CTRL_C_EVENT to the console that `pid` is attached to.
+///
+/// Must be called from a process with **no** console of its own (spawned with
+/// `DETACHED_PROCESS`) so that `AttachConsole` can join the target's console
+/// without disturbing any other process.
+#[cfg(windows)]
+fn win_send_ctrl_c(pid: u32) {
+    #[link(name = "kernel32")]
+    unsafe extern "system" {
+        fn FreeConsole() -> i32;
+        fn AttachConsole(dwProcessId: u32) -> i32;
+        fn SetConsoleCtrlHandler(
+            HandlerRoutine: Option<unsafe extern "system" fn(u32) -> i32>,
+            Add: i32,
+        ) -> i32;
+        fn GenerateConsoleCtrlEvent(dwCtrlEvent: u32, dwProcessGroupId: u32) -> i32;
+    }
+    const CTRL_BREAK_EVENT: u32 = 1;
+
+    unsafe extern "system" fn ignore_all(_ctrl_type: u32) -> i32 {
+        1 // handled — don't terminate this helper process
+    }
+
+    unsafe {
+        FreeConsole();
+        if AttachConsole(pid) == 0 {
+            return;
+        }
+        // Register a handler that ignores ALL control events (including BREAK)
+        // so that the signal we generate doesn't kill this helper process.
+        SetConsoleCtrlHandler(Some(ignore_all), 1);
+        // CTRL_C_EVENT does not work through ConPTY (the console subsystem
+        // swallows it).  CTRL_BREAK_EVENT does work — it interrupts the
+        // running command or terminates the child process.
+        GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT, 0);
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        FreeConsole();
     }
 }
