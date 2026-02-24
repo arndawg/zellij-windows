@@ -288,21 +288,24 @@ impl WindowsPtyBackend {
         match map.get_mut(&terminal_id) {
             Some(Some(handle)) => {
                 if buf == [0x03] {
-                    // Ctrl+C handling for Windows ConPTY. Three mechanisms
-                    // are used because no single one works in all cases:
+                    // Ctrl+C handling for Windows ConPTY. Two mechanisms:
                     //
                     // 1. Write byte 0x03 to the ConPTY pipe — works when the
-                    //    shell is at an idle prompt (ReadConsoleW processes it).
+                    //    shell is idle (ReadConsoleW processes it) and for
+                    //    programs that read stdin (e.g. node.js/Claude Code
+                    //    reads 0x03 and handles it as Ctrl+C gracefully).
                     //
-                    // 2. Terminate descendant processes — works for external
-                    //    commands (ping, node, cargo, etc.) that are child
-                    //    processes of the shell.
+                    // 2. Send a win32-input-mode encoded Ctrl+Break event
+                    //    when there are no child processes — works for
+                    //    built-in commands (dir /s, etc.) that run inside
+                    //    the shell itself. The CSI sequence is always parsed
+                    //    by conhost's VT input thread.
                     //
-                    // 3. Send a win32-input-mode encoded Ctrl+Break event —
-                    //    works for built-in commands (dir /s, etc.) that run
-                    //    inside the shell process itself with no children.
-                    //    The CSI sequence is always parsed by conhost's VT
-                    //    input thread regardless of CreatePseudoConsole flags.
+                    // We intentionally do NOT use TerminateProcess here:
+                    // it would kill programs like Claude Code before they
+                    // can read the 0x03 byte and handle Ctrl+C gracefully.
+                    // TerminateProcess is reserved for send_sigint() which
+                    // is only called programmatically (e.g. closing panes).
                     if let Some(writer) = handle.writer.as_mut() {
                         let _ = writer.write_all(b"\x03");
                         let _ = writer.flush();
@@ -310,10 +313,9 @@ impl WindowsPtyBackend {
                     let shell_pid = handle.child_pid;
                     // Drop the lock before the potentially slow process walk
                     drop(map);
-                    let had_descendants = Self::terminate_descendants(shell_pid);
 
-                    if !had_descendants {
-                        // No child processes found — likely a built-in command.
+                    if !Self::has_descendants(shell_pid) {
+                        // No child processes — likely a built-in command.
                         // Send CTRL_BREAK_EVENT via win32-input-mode VT sequence.
                         // Format: CSI Vk;Sc;Uc;Kd;Cs;Rc _
                         //   VK_CANCEL=3, Sc=70, Uc=0, Kd=1/0, Cs=8(LEFT_CTRL), Rc=1
@@ -404,30 +406,22 @@ impl WindowsPtyBackend {
         Ok(())
     }
 
-    /// Terminate all descendant processes of `parent_pid` without killing
-    /// `parent_pid` itself (the shell). Uses the Toolhelp API to walk the
-    /// process tree and find children, then recursively terminates them
-    /// bottom-up (leaves first).
-    /// Returns `true` if any descendants were found and terminated.
-    fn terminate_descendants(parent_pid: u32) -> bool {
+    /// Find all descendant PIDs of `parent_pid` using the Toolhelp API.
+    fn find_descendants(parent_pid: u32) -> Vec<u32> {
         use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
         use windows_sys::Win32::System::Diagnostics::ToolHelp::*;
-        use windows_sys::Win32::System::Threading::{
-            OpenProcess, TerminateProcess, PROCESS_TERMINATE,
-        };
 
         unsafe {
             let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
             if snapshot == INVALID_HANDLE_VALUE {
                 log::error!("CreateToolhelp32Snapshot failed");
-                return false;
+                return Vec::new();
             }
 
             let mut entry: PROCESSENTRY32W = std::mem::zeroed();
             entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
 
-            // Collect all processes and their parent PIDs
-            let mut all_procs: Vec<(u32, u32)> = Vec::new(); // (pid, parent_pid)
+            let mut all_procs: Vec<(u32, u32)> = Vec::new();
             if Process32FirstW(snapshot, &mut entry) != 0 {
                 loop {
                     all_procs.push((entry.th32ProcessID, entry.th32ParentProcessID));
@@ -438,7 +432,6 @@ impl WindowsPtyBackend {
             }
             CloseHandle(snapshot);
 
-            // Find all descendants of parent_pid using BFS
             let mut descendants: Vec<u32> = Vec::new();
             let mut queue: Vec<u32> = vec![parent_pid];
             while let Some(pid) = queue.pop() {
@@ -449,27 +442,43 @@ impl WindowsPtyBackend {
                     }
                 }
             }
+            descendants
+        }
+    }
 
-            if descendants.is_empty() {
-                return false;
-            }
+    /// Check whether `parent_pid` has any descendant processes.
+    fn has_descendants(parent_pid: u32) -> bool {
+        !Self::find_descendants(parent_pid).is_empty()
+    }
 
-            log::info!(
-                "Ctrl+C: terminating {} descendants of shell PID {}: {:?}",
-                descendants.len(),
-                parent_pid,
-                descendants
-            );
+    /// Terminate all descendant processes of `parent_pid` without killing
+    /// `parent_pid` itself (the shell). Terminates bottom-up (leaves first).
+    fn terminate_descendants(parent_pid: u32) {
+        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, TerminateProcess, PROCESS_TERMINATE,
+        };
 
-            // Terminate in reverse order (leaves first)
-            for &pid in descendants.iter().rev() {
+        let descendants = Self::find_descendants(parent_pid);
+        if descendants.is_empty() {
+            return;
+        }
+
+        log::info!(
+            "Terminating {} descendants of PID {}: {:?}",
+            descendants.len(),
+            parent_pid,
+            descendants
+        );
+
+        for &pid in descendants.iter().rev() {
+            unsafe {
                 let proc_handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
                 if !proc_handle.is_null() && proc_handle != INVALID_HANDLE_VALUE {
                     TerminateProcess(proc_handle, 1);
                     CloseHandle(proc_handle);
                 }
             }
-            true
         }
     }
 
