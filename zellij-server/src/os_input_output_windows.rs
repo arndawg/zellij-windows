@@ -202,11 +202,18 @@ impl WindowsPtyBackend {
             .map_err(|e| anyhow::anyhow!("failed to clone pty reader: {}", e))
             .with_context(|| err_context(&cmd))?;
 
-        let writer = pair
+        let mut writer = pair
             .master
             .take_writer()
             .map_err(|e| anyhow::anyhow!("failed to take pty writer: {}", e))
             .with_context(|| err_context(&cmd))?;
+
+        // ConPTY sends a Device Status Report (ESC[6n) on startup and blocks
+        // all child output until it receives a cursor position response.
+        // Pre-emptively send the response so the child can start immediately
+        // rather than waiting for the query to flow through the full pipeline.
+        let _ = writer.write_all(b"\x1b[1;1R");
+        let _ = writer.flush();
 
         let killer = child.clone_killer();
 
