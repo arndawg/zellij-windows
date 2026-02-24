@@ -6,9 +6,9 @@ use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::{self, Read, Write},
-    path::PathBuf,
     sync::{Arc, Mutex},
     thread,
+    time::Instant,
 };
 
 use zellij_utils::{errors::prelude::*, input::command::RunCommand};
@@ -115,6 +115,11 @@ struct MasterHandle {
     writer: Option<Box<dyn Write + Send>>,
     killer: Box<dyn portable_pty::ChildKiller + Send + Sync>,
     child_pid: u32,
+    /// Timestamp of the last Ctrl+C (byte 0x03) write for escalation logic.
+    /// First Ctrl+C: only write byte 0x03 (lets raw-mode programs handle it).
+    /// Second Ctrl+C within 1 second: escalate to CTRL_BREAK_EVENT to force-
+    /// interrupt programs that don't read stdin (e.g. `dir /s`).
+    last_ctrl_c: Option<Instant>,
 }
 
 /// The Windows PTY backend. Uses `portable-pty` (ConPTY) under the hood.
@@ -210,6 +215,7 @@ impl WindowsPtyBackend {
             writer: Some(writer),
             killer,
             child_pid,
+            last_ctrl_c: None,
         };
 
         self.terminal_id_to_master
@@ -303,19 +309,54 @@ impl WindowsPtyBackend {
 
         match map.get_mut(&terminal_id) {
             Some(Some(handle)) => {
-                // ConPTY does not generate CTRL_C_EVENT when byte 0x03 is written
-                // to the input pipe — it only places the byte in the child's input
-                // buffer.  That works at a prompt (cmd.exe reads it) but does NOT
-                // interrupt a running command (e.g. `dir /s`), which requires an
-                // asynchronous CTRL_C_EVENT signal.
+                // Escalating Ctrl+C for ConPTY:
                 //
-                // To deliver the signal we spawn a short-lived helper process
-                // (DETACHED_PROCESS) that attaches to the child's console and calls
-                // GenerateConsoleCtrlEvent.  We also still write the raw byte so
-                // that programs in raw-input mode (ENABLE_PROCESSED_INPUT off) see
-                // 0x03 in their input stream.
+                // Writing raw byte 0x03 to the ConPTY pipe triggers
+                // ENABLE_PROCESSED_INPUT handling: the console subsystem
+                // generates a real CTRL_C_EVENT signal that kills the child
+                // process immediately — before raw-mode programs (crossterm-
+                // based apps like Claude Code, vim) can intercept it.
+                //
+                // Instead, we send a Win32 input mode escape sequence that
+                // ConPTY translates into an INPUT_RECORD placed in the
+                // child's console input buffer.  Raw-mode programs read it
+                // as a Ctrl+C key event; programs with ENABLE_PROCESSED_INPUT
+                // see it as a ^C at the prompt without being killed.
+                //
+                // Strategy:
+                //   1st Ctrl+C: send Win32 input mode key event (safe for
+                //     interactive programs — they handle it gracefully)
+                //   2nd Ctrl+C within 1s: send CTRL_BREAK_EVENT via helper
+                //     process to force-interrupt unresponsive commands
+                //     (e.g. `dir /s c:\`)
                 if buf == [0x03] {
-                    spawn_ctrl_c_helper(handle.child_pid);
+                    // Escalation temporarily disabled for testing.
+                    // let now = Instant::now();
+                    // let should_escalate = handle
+                    //     .last_ctrl_c
+                    //     .map(|prev| now.duration_since(prev).as_millis() < 1000)
+                    //     .unwrap_or(false);
+                    // if should_escalate {
+                    //     spawn_ctrl_c_helper(handle.child_pid);
+                    //     handle.last_ctrl_c = None;
+                    // } else {
+                    //     handle.last_ctrl_c = Some(now);
+                    // }
+
+                    // Win32 input mode escape sequence for Ctrl+C key-down:
+                    //   \x1b[Vk;Sc;Uc;Kd;Cs;Rc_
+                    //   Vk=67 (VK_C), Sc=46 (scan code), Uc=3 (ETX),
+                    //   Kd=1 (key down), Cs=8 (LEFT_CTRL_PRESSED), Rc=1
+                    const CTRL_C_KEY_EVENT: &[u8] = b"\x1b[67;46;3;1;8;1_";
+                    if let Some(writer) = handle.writer.as_mut() {
+                        return writer
+                            .write(CTRL_C_KEY_EVENT)
+                            .map_err(|e| anyhow::anyhow!("{}", e))
+                            .with_context(err_context);
+                    } else {
+                        return Err(anyhow!("writer not available"))
+                            .with_context(err_context);
+                    }
                 }
 
                 if let Some(writer) = handle.writer.as_mut() {
