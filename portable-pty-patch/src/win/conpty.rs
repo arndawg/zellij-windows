@@ -3,16 +3,46 @@ use crate::win::psuedocon::PsuedoCon;
 use crate::{Child, MasterPty, PtyPair, PtySize, PtySystem, SlavePty};
 use anyhow::Error;
 use filedescriptor::{FileDescriptor, Pipe};
+use std::os::windows::io::FromRawHandle;
 use std::sync::{Arc, Mutex};
+use winapi::um::handleapi::INVALID_HANDLE_VALUE;
+use winapi::um::namedpipeapi::CreatePipe;
+use winapi::um::minwinbase::SECURITY_ATTRIBUTES;
 use winapi::um::wincon::COORD;
+use winapi::um::winnt::HANDLE;
 
 #[derive(Default)]
 pub struct ConPtySystem {}
 
+impl ConPtySystem {
+    /// Create an anonymous pipe with a specified buffer size.
+    fn create_pipe_with_buffer(buffer_size: u32) -> anyhow::Result<Pipe> {
+        let mut read: HANDLE = INVALID_HANDLE_VALUE;
+        let mut write: HANDLE = INVALID_HANDLE_VALUE;
+        let mut sa = SECURITY_ATTRIBUTES {
+            nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: std::ptr::null_mut(),
+            bInheritHandle: 1,
+        };
+        let result = unsafe { CreatePipe(&mut read, &mut write, &mut sa, buffer_size) };
+        if result == 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        Ok(Pipe {
+            read: unsafe { FileDescriptor::from_raw_handle(read as _) },
+            write: unsafe { FileDescriptor::from_raw_handle(write as _) },
+        })
+    }
+}
+
 impl PtySystem for ConPtySystem {
     fn openpty(&self, size: PtySize) -> anyhow::Result<PtyPair> {
         let stdin = Pipe::new()?;
-        let stdout = Pipe::new()?;
+        // Create the stdout pipe with a large buffer (1MB) to reduce
+        // conhost lock contention during heavy output. When conhost's
+        // output thread can buffer more data without blocking, the
+        // console lock is released faster, keeping the UI responsive.
+        let stdout = Self::create_pipe_with_buffer(1024 * 1024)?;
 
         let con = PsuedoCon::new(
             COORD {

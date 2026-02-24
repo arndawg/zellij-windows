@@ -7,27 +7,21 @@ use std::sync::mpsc as std_mpsc;
 use std::thread;
 use std::time::Duration;
 
-/// Flag set by the console ctrl handler when Ctrl-C is pressed.
-/// On Windows, Ctrl-C should be forwarded to the active terminal pane
-/// (as byte 0x03) rather than treated as a quit signal. The stdin read
-/// loop checks this flag to synthesize the byte when ReadFile is
-/// interrupted by the CTRL_C_EVENT.
-pub static CTRL_C_PRESSED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
-
 /// Async signal listener for Windows.
 ///
-/// Uses `tokio::signal::windows` for Ctrl-C / Ctrl-Break, and polls
+/// Uses `tokio::signal::windows` for Ctrl-Break, and polls
 /// `crossterm::terminal::size()` for resize detection.
+///
+/// Ctrl-C is NOT handled here — with ENABLE_PROCESSED_INPUT disabled
+/// (raw console mode), byte 0x03 is delivered directly through ReadFile
+/// to the stdin reader, which forwards it to the active terminal pane.
 pub(crate) struct AsyncSignalListener {
-    ctrl_c: tokio::signal::windows::CtrlC,
     ctrl_break: tokio::signal::windows::CtrlBreak,
     resize_rx: tokio::sync::mpsc::Receiver<()>,
 }
 
 impl AsyncSignalListener {
     pub fn new() -> io::Result<Self> {
-        let ctrl_c = tokio::signal::windows::ctrl_c()?;
         let ctrl_break = tokio::signal::windows::ctrl_break()?;
 
         let (resize_tx, resize_rx) = tokio::sync::mpsc::channel(16);
@@ -53,7 +47,6 @@ impl AsyncSignalListener {
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
         Ok(Self {
-            ctrl_c,
             ctrl_break,
             resize_rx,
         })
@@ -64,13 +57,6 @@ impl AsyncSignalListener {
 impl crate::os_input_output::AsyncSignals for AsyncSignalListener {
     async fn recv(&mut self) -> Option<SignalEvent> {
         tokio::select! {
-            _result = self.ctrl_c.recv() => {
-                // Ctrl-C should be forwarded to terminal panes, not trigger quit.
-                // Set the flag so the stdin loop can synthesize byte 0x03.
-                CTRL_C_PRESSED.store(true, std::sync::atomic::Ordering::SeqCst);
-                // Return None to continue the select loop (no SignalEvent emitted)
-                None
-            },
             result = self.ctrl_break.recv() => result.map(|_| SignalEvent::Quit),
             result = self.resize_rx.recv() => result.map(|_| SignalEvent::Resize),
         }
@@ -79,9 +65,11 @@ impl crate::os_input_output::AsyncSignals for AsyncSignalListener {
 
 /// Blocking signal iterator for Windows.
 ///
-/// Spawns a thread that uses `ctrlc`-style handling (via a raw
-/// `SetConsoleCtrlHandler` wrapper) for quit signals, and polls
-/// `crossterm::terminal::size()` for resize events.
+/// Spawns a thread that uses `SetConsoleCtrlHandler` for Ctrl-Break
+/// (quit signal), and polls `crossterm::terminal::size()` for resize events.
+///
+/// Ctrl-C is NOT intercepted — it flows through ReadFile as byte 0x03
+/// when ENABLE_PROCESSED_INPUT is disabled (raw console mode).
 pub(crate) struct BlockingSignalIterator {
     rx: std_mpsc::Receiver<SignalEvent>,
 }
@@ -111,39 +99,28 @@ impl BlockingSignalIterator {
             })
             .map_err(|e| io::Error::new(io::ErrorKind::Other, e))?;
 
-        // Thread for Ctrl-C / Ctrl-Break handling
+        // Thread for Ctrl-Break handling (quit signal)
         let quit_tx = tx;
         thread::Builder::new()
             .name("blocking_ctrl_handler".to_string())
             .spawn(move || {
-                // Use a simple polling approach with tokio's blocking ctrl_c
-                // since we need this on a blocking thread
                 use windows_sys::Win32::System::Console::{
-                    SetConsoleCtrlHandler, CTRL_BREAK_EVENT, CTRL_C_EVENT,
+                    SetConsoleCtrlHandler, CTRL_BREAK_EVENT,
                 };
 
-                // We use a static channel sender via a global, since
-                // SetConsoleCtrlHandler requires a static function pointer.
-                // For simplicity in this blocking context, we just use a
-                // parking_lot-free approach: poll a flag set by the handler.
                 static QUIT_FLAG: std::sync::atomic::AtomicBool =
                     std::sync::atomic::AtomicBool::new(false);
 
                 unsafe extern "system" fn handler(ctrl_type: u32) -> i32 {
                     match ctrl_type {
-                        CTRL_C_EVENT => {
-                            // Don't quit — forward Ctrl-C to the active terminal pane.
-                            // Set CTRL_C_PRESSED so the stdin loop can synthesize byte 0x03
-                            // (ReadFile is interrupted by CTRL_C_EVENT on Windows and won't
-                            // deliver the byte itself).
-                            CTRL_C_PRESSED.store(true, std::sync::atomic::Ordering::SeqCst);
-                            1 // handled — prevent default termination
-                        },
                         CTRL_BREAK_EVENT => {
                             QUIT_FLAG.store(true, std::sync::atomic::Ordering::SeqCst);
                             1 // handled
                         },
-                        _ => 0,
+                        // Prevent default termination for CTRL_C_EVENT but don't
+                        // intercept it — with ENABLE_PROCESSED_INPUT disabled,
+                        // byte 0x03 flows through ReadFile directly.
+                        _ => 1,
                     }
                 }
 

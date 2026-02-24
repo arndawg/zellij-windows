@@ -1,7 +1,7 @@
 use crate::os_input_output::{command_exists, AsyncReader};
 use crate::panes::PaneId;
 
-use portable_pty::{native_pty_system, CommandBuilder, MasterPty, PtySize};
+use portable_pty::{CommandBuilder, MasterPty, PtySize};
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -128,7 +128,11 @@ impl WindowsPtyBackend {
             .with_context(|| err_context(&cmd));
         }
 
-        let pty_system = native_pty_system();
+        // Use ConPtySystem directly for the large (1MB) output pipe buffer
+        // which reduces conhost lock contention during heavy output.
+        use portable_pty::win::conpty::ConPtySystem;
+        use portable_pty::PtySystem;
+        let pty_system = ConPtySystem::default();
 
         let pair = pty_system
             .openpty(PtySize {
@@ -283,6 +287,51 @@ impl WindowsPtyBackend {
 
         match map.get_mut(&terminal_id) {
             Some(Some(handle)) => {
+                if buf == [0x03] {
+                    // Ctrl+C handling for Windows ConPTY. Three mechanisms
+                    // are used because no single one works in all cases:
+                    //
+                    // 1. Write byte 0x03 to the ConPTY pipe — works when the
+                    //    shell is at an idle prompt (ReadConsoleW processes it).
+                    //
+                    // 2. Terminate descendant processes — works for external
+                    //    commands (ping, node, cargo, etc.) that are child
+                    //    processes of the shell.
+                    //
+                    // 3. Send a win32-input-mode encoded Ctrl+Break event —
+                    //    works for built-in commands (dir /s, etc.) that run
+                    //    inside the shell process itself with no children.
+                    //    The CSI sequence is always parsed by conhost's VT
+                    //    input thread regardless of CreatePseudoConsole flags.
+                    if let Some(writer) = handle.writer.as_mut() {
+                        let _ = writer.write_all(b"\x03");
+                        let _ = writer.flush();
+                    }
+                    let shell_pid = handle.child_pid;
+                    // Drop the lock before the potentially slow process walk
+                    drop(map);
+                    let had_descendants = Self::terminate_descendants(shell_pid);
+
+                    if !had_descendants {
+                        // No child processes found — likely a built-in command.
+                        // Send CTRL_BREAK_EVENT via win32-input-mode VT sequence.
+                        // Format: CSI Vk;Sc;Uc;Kd;Cs;Rc _
+                        //   VK_CANCEL=3, Sc=70, Uc=0, Kd=1/0, Cs=8(LEFT_CTRL), Rc=1
+                        let mut map = self
+                            .terminal_id_to_master
+                            .lock()
+                            .to_anyhow()
+                            .with_context(err_context)?;
+                        if let Some(Some(handle)) = map.get_mut(&terminal_id) {
+                            if let Some(writer) = handle.writer.as_mut() {
+                                let _ = writer.write_all(b"\x1b[3;70;0;1;8;1_");
+                                let _ = writer.write_all(b"\x1b[3;70;0;0;8;1_");
+                                let _ = writer.flush();
+                            }
+                        }
+                    }
+                    return Ok(1);
+                }
                 if let Some(writer) = handle.writer.as_mut() {
                     writer
                         .write(buf)
@@ -348,22 +397,80 @@ impl WindowsPtyBackend {
     }
 
     pub fn send_sigint(&self, pid: u32) -> Result<()> {
-        // Write byte 0x03 to the terminal's PTY input pipe.
-        // Without PSEUDOCONSOLE_WIN32_INPUT_MODE, ConPTY translates this
-        // into a CTRL_C_EVENT for the child process.
-        let mut map = self.terminal_id_to_master.lock().to_anyhow()?;
-        for handle_opt in map.values_mut() {
-            if let Some(handle) = handle_opt {
-                if handle.child_pid == pid {
-                    if let Some(writer) = handle.writer.as_mut() {
-                        let _ = writer.write(&[0x03]);
-                        let _ = writer.flush();
+        // Terminate descendant processes of the shell. This is the Windows
+        // equivalent of sending SIGINT: GenerateConsoleCtrlEvent is broken
+        // in ConPTY sessions, so we directly terminate the child processes.
+        Self::terminate_descendants(pid);
+        Ok(())
+    }
+
+    /// Terminate all descendant processes of `parent_pid` without killing
+    /// `parent_pid` itself (the shell). Uses the Toolhelp API to walk the
+    /// process tree and find children, then recursively terminates them
+    /// bottom-up (leaves first).
+    /// Returns `true` if any descendants were found and terminated.
+    fn terminate_descendants(parent_pid: u32) -> bool {
+        use windows_sys::Win32::Foundation::{CloseHandle, INVALID_HANDLE_VALUE};
+        use windows_sys::Win32::System::Diagnostics::ToolHelp::*;
+        use windows_sys::Win32::System::Threading::{
+            OpenProcess, TerminateProcess, PROCESS_TERMINATE,
+        };
+
+        unsafe {
+            let snapshot = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+            if snapshot == INVALID_HANDLE_VALUE {
+                log::error!("CreateToolhelp32Snapshot failed");
+                return false;
+            }
+
+            let mut entry: PROCESSENTRY32W = std::mem::zeroed();
+            entry.dwSize = std::mem::size_of::<PROCESSENTRY32W>() as u32;
+
+            // Collect all processes and their parent PIDs
+            let mut all_procs: Vec<(u32, u32)> = Vec::new(); // (pid, parent_pid)
+            if Process32FirstW(snapshot, &mut entry) != 0 {
+                loop {
+                    all_procs.push((entry.th32ProcessID, entry.th32ParentProcessID));
+                    if Process32NextW(snapshot, &mut entry) == 0 {
+                        break;
                     }
-                    return Ok(());
                 }
             }
+            CloseHandle(snapshot);
+
+            // Find all descendants of parent_pid using BFS
+            let mut descendants: Vec<u32> = Vec::new();
+            let mut queue: Vec<u32> = vec![parent_pid];
+            while let Some(pid) = queue.pop() {
+                for &(child_pid, ppid) in &all_procs {
+                    if ppid == pid && child_pid != parent_pid {
+                        descendants.push(child_pid);
+                        queue.push(child_pid);
+                    }
+                }
+            }
+
+            if descendants.is_empty() {
+                return false;
+            }
+
+            log::info!(
+                "Ctrl+C: terminating {} descendants of shell PID {}: {:?}",
+                descendants.len(),
+                parent_pid,
+                descendants
+            );
+
+            // Terminate in reverse order (leaves first)
+            for &pid in descendants.iter().rev() {
+                let proc_handle = OpenProcess(PROCESS_TERMINATE, 0, pid);
+                if !proc_handle.is_null() && proc_handle != INVALID_HANDLE_VALUE {
+                    TerminateProcess(proc_handle, 1);
+                    CloseHandle(proc_handle);
+                }
+            }
+            true
         }
-        Ok(())
     }
 
     pub fn reserve_terminal_id(&self, terminal_id: u32) {
