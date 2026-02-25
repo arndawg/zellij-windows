@@ -36,8 +36,6 @@ ConPTY support, Windows IPC, signal handling, and platform abstractions.
   the ConPTY to detect whether the child consumes stdin. Works for interactive
   programs (Claude Code, node) and non-interactive programs (ping, dir /s)
   but has edge cases during application startup
-- **No detached sessions**: Unlike tmux, zellij does not support detaching
-  and reattaching to sessions from different terminals
 - **Sixel/image support**: Disabled (DA1 reports VT100+AVO to match tmux)
 
 ## Installation
