@@ -103,7 +103,10 @@ impl NewSessionInfo {
                 } else {
                     Some(self.name.as_str())
                 };
-                if new_session_name != current_session_name.as_ref().map(|s| s.as_str()) {
+                // new_session_name == None means "create a new anonymous session" which is always
+                // valid, even if current_session_name is also None (plugin hasn't received
+                // SessionUpdate yet). Without this, None != None is false and the switch is skipped.
+                if new_session_name.is_none() || new_session_name != current_session_name.as_ref().map(|s| s.as_str()) {
                     match new_session_layout {
                         Some(new_session_layout) => {
                             let cwd = self.new_session_folder.as_ref().map(|c| PathBuf::from(c));

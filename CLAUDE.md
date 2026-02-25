@@ -25,6 +25,23 @@ export PATH="$PATH:/c/Program Files (x86)/Microsoft Visual Studio/2022/BuildTool
 cargo build --release --no-default-features --features "plugins_from_target,web_server_capability"
 ```
 
+### Rebuilding WASM plugins (required after changing plugin source)
+
+In release mode, plugins are ALWAYS loaded from the static assets in
+`zellij-utils/assets/plugins/*.wasm` — the `plugins_from_target` feature only affects
+debug builds. After changing any plugin source (e.g. `default-plugins/session-manager/`),
+rebuild and copy before the main build:
+
+```bash
+# Rebuild a specific plugin (e.g. session-manager)
+cd default-plugins/session-manager
+cargo build --release --target wasm32-wasip1
+cp ../../target/wasm32-wasip1/release/session-manager.wasm \
+   ../../zellij-utils/assets/plugins/session-manager.wasm
+cd ../..
+# Then do the normal release build
+```
+
 ## Windows ConPTY Notes
 
 - ConPTY panes spawn `cmd.exe` by default

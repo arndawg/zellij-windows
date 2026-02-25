@@ -23,7 +23,9 @@ ConPTY support, Windows IPC, signal handling, and platform abstractions.
   to prevent unauthorized access and pipe squatting; IPC messages are
   size-limited (64 MiB) to prevent OOM from malicious/corrupted peers
 - **Resize**: Dynamic terminal and pane resize
-- **Web server**: Browser-based terminal access via `zellij web`
+- **Web server**: Browser-based terminal access via `zellij web`. Share a session
+  with `Ctrl+O, s, Enter`. Connect from a browser, authenticate with a token, then
+  press Enter to create a new session or type an existing session name.
   (note: `--daemonize` is not supported on Windows — runs in foreground)
 - **HTTP/TLS**: Uses Windows native TLS (schannel) — no vendored OpenSSL needed
 

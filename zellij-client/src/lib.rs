@@ -234,16 +234,33 @@ fn spawn_web_server(cli_args: &CliArgs) -> Result<String, String> {
     }
     cmd.arg("web");
     cmd.arg("-d");
-    let output = cmd.output();
-    match output {
-        Ok(output) => {
-            if output.status.success() {
-                Ok(String::from_utf8_lossy(&output.stdout).to_string())
-            } else {
-                Err(String::from_utf8_lossy(&output.stderr).to_string())
-            }
-        },
-        Err(e) => Err(e.to_string()),
+
+    // On Unix, -d causes the web server to daemonize (double-fork), so cmd.output()
+    // returns quickly after the parent exits. On Windows, daemonize is not supported
+    // and the web server runs in foreground — cmd.output() would block forever.
+    // Use spawn() with detached process flags instead (same pattern as spawn_server).
+    #[cfg(not(windows))]
+    {
+        let output = cmd.output();
+        match output {
+            Ok(output) => {
+                if output.status.success() {
+                    Ok(String::from_utf8_lossy(&output.stdout).to_string())
+                } else {
+                    Err(String::from_utf8_lossy(&output.stderr).to_string())
+                }
+            },
+            Err(e) => Err(e.to_string()),
+        }
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        cmd.creation_flags(0x200 | 0x08000000); // CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW
+        match cmd.spawn() {
+            Ok(_child) => Ok(String::new()),
+            Err(e) => Err(e.to_string()),
+        }
     }
 }
 

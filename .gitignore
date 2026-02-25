@@ -6,4 +6,4 @@ target/
 .DS_Store
 /assets/man/zellij.1
 TODO.md
-*investigation.md
+investigation*.md
