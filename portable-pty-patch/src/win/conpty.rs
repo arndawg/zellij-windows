@@ -38,11 +38,10 @@ impl ConPtySystem {
 impl PtySystem for ConPtySystem {
     fn openpty(&self, size: PtySize) -> anyhow::Result<PtyPair> {
         let stdin = Pipe::new()?;
-        // Create the stdout pipe with a large buffer (1MB) to reduce
-        // conhost lock contention during heavy output. When conhost's
-        // output thread can buffer more data without blocking, the
-        // console lock is released faster, keeping the UI responsive.
-        let stdout = Self::create_pipe_with_buffer(1024 * 1024)?;
+        // Use default pipe buffer size (~4KB) to match tmux.
+        // Large buffers (1MB) let conhost batch output lazily;
+        // small buffers force eager flushing, reducing echo latency.
+        let stdout = Pipe::new()?;
 
         let con = PsuedoCon::new(
             COORD {

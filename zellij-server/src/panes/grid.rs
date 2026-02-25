@@ -3353,8 +3353,10 @@ impl Perform for Grid {
             // https://vt100.net/docs/vt510-rm/DA1.html
             match intermediates.get(0) {
                 None | Some(0) => {
-                    // primary device attributes - VT220 with sixel
-                    let terminal_capabilities = "\u{1b}[?62;4c";
+                    // primary device attributes - VT100 with AVO (matches tmux)
+                    // VT220+sixel (?62;4c) caused ConPTY/Claude Code to use
+                    // heavier rendering, contributing to output stalls
+                    let terminal_capabilities = "\u{1b}[?1;2c";
                     self.pending_messages_to_pty
                         .push(terminal_capabilities.as_bytes().to_vec());
                 },

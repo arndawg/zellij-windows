@@ -84,8 +84,10 @@ impl PsuedoCon {
                 size,
                 input.as_raw_handle() as _,
                 output.as_raw_handle() as _,
-                PSUEDOCONSOLE_INHERIT_CURSOR
-                    | PSEUDOCONSOLE_RESIZE_QUIRK,
+                // Use flags=0 to match tmux. INHERIT_CURSOR causes DSR query
+                // that stalls startup. RESIZE_QUIRK triggers full screen
+                // repaints on resize that cause multi-second output stalls.
+                0,
                 &mut con,
             )
         };

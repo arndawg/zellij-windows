@@ -180,12 +180,9 @@ impl WindowsPtyBackend {
             .map_err(|e| anyhow::anyhow!("failed to take pty writer: {}", e))
             .with_context(|| err_context(&cmd))?;
 
-        // ConPTY sends a Device Status Report (ESC[6n) on startup and blocks
-        // all child output until it receives a cursor position response.
-        // Pre-emptively send the response so the child can start immediately
-        // rather than waiting for the query to flow through the full pipeline.
-        let _ = writer.write_all(b"\x1b[1;1R");
-        let _ = writer.flush();
+        // NOTE: Pre-sending DSR response (ESC[1;1R) was removed because with
+        // flags=0, system conhost doesn't send ESC[6n, making the unsolicited
+        // response confuse conhost and cause a 5+ second startup stall.
 
         let killer = child.clone_killer();
 
