@@ -5,6 +5,7 @@ use crate::web_server_contract::web_server_contract::InstructionForWebServer as 
 use crate::web_server_contract::web_server_contract::WebServerResponse as ProtoWebServerResponse;
 use crate::ipc::path_to_ipc_name;
 use interprocess::local_socket::Stream as LocalSocketStream;
+use interprocess::local_socket::traits::Stream;
 use prost::Message;
 use serde::{Deserialize, Serialize};
 use std::fs;

@@ -18,9 +18,11 @@ taskkill //F //IM zellij.exe 2>/dev/null; sleep 2
 ## Build Commands
 
 ```bash
-# Release build (Windows, no default features)
+# Release build (Windows)
+# Requires cmake in PATH (included with VS Build Tools)
 taskkill //F //IM zellij.exe 2>/dev/null; sleep 2
-cargo build --release --no-default-features --features plugins_from_target
+export PATH="$PATH:/c/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/Common7/IDE/CommonExtensions/Microsoft/CMake/CMake/bin"
+cargo build --release --no-default-features --features "plugins_from_target,web_server_capability"
 ```
 
 ## Windows ConPTY Notes

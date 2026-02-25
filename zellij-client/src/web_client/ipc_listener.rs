@@ -1,6 +1,9 @@
 use axum_server::Handle;
+use std::io::{Read, Write};
 use std::net::IpAddr;
+#[cfg(unix)]
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+#[cfg(unix)]
 use tokio::net::{UnixListener, UnixStream};
 use zellij_utils::consts::WEBSERVER_SOCKET_PATH;
 use zellij_utils::prost::Message;
@@ -8,6 +11,7 @@ use zellij_utils::web_server_commands::{InstructionForWebServer, VersionInfo, We
 use zellij_utils::web_server_contract::web_server_contract::InstructionForWebServer as ProtoInstructionForWebServer;
 use zellij_utils::web_server_contract::web_server_contract::WebServerResponse as ProtoWebServerResponse;
 
+#[cfg(unix)]
 pub async fn create_webserver_receiver(
     id: &str,
 ) -> Result<UnixStream, Box<dyn std::error::Error + Send + Sync>> {
@@ -23,6 +27,7 @@ pub async fn create_webserver_receiver(
     Ok(stream)
 }
 
+#[cfg(unix)]
 pub async fn receive_webserver_instruction(
     receiver: &mut UnixStream,
 ) -> std::io::Result<InstructionForWebServer> {
@@ -45,6 +50,7 @@ pub async fn receive_webserver_instruction(
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))
 }
 
+#[cfg(unix)]
 pub async fn send_webserver_response(
     sender: &mut UnixStream,
     response: WebServerResponse,
@@ -60,6 +66,7 @@ pub async fn send_webserver_response(
     Ok(())
 }
 
+#[cfg(unix)]
 pub async fn listen_to_web_server_instructions(
     server_handle: Handle,
     id: &str,
@@ -87,6 +94,88 @@ pub async fn listen_to_web_server_instructions(
                 Err(e) => {
                     log::error!("Failed to process web server instruction: {}", e);
                 },
+            },
+            Err(e) => {
+                log::error!("Failed to listen to ipc channel: {}", e);
+                break;
+            },
+        }
+    }
+}
+
+// Windows implementation using interprocess local_socket (named pipes)
+// wrapped in spawn_blocking since interprocess doesn't have async support.
+#[cfg(windows)]
+pub async fn listen_to_web_server_instructions(
+    server_handle: Handle,
+    id: &str,
+    web_server_ip: IpAddr,
+    web_server_port: u16,
+) {
+    use interprocess::local_socket::{prelude::*, ListenerOptions};
+    use zellij_utils::ipc::path_to_ipc_name;
+
+    std::fs::create_dir_all(&WEBSERVER_SOCKET_PATH.as_path()).ok();
+    let socket_path = WEBSERVER_SOCKET_PATH.join(format!("{}", id));
+
+    loop {
+        let path = socket_path.clone();
+        let ip = web_server_ip;
+        let port = web_server_port;
+        let handle = server_handle.clone();
+
+        let result = tokio::task::spawn_blocking(move || -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
+            let fs_name = path_to_ipc_name(&path)?;
+            let listener = ListenerOptions::new()
+                .name(fs_name)
+                .create_sync()?;
+            let mut stream = listener.incoming().next()
+                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "no incoming connection"))??;
+
+            // Read length prefix (4 bytes)
+            let mut len_bytes = [0u8; 4];
+            stream.read_exact(&mut len_bytes)?;
+            let len = u32::from_le_bytes(len_bytes) as usize;
+
+            // Read protobuf message
+            let mut buffer = vec![0u8; len];
+            stream.read_exact(&mut buffer)?;
+
+            let proto_instruction = ProtoInstructionForWebServer::decode(&buffer[..])
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+            let instruction: InstructionForWebServer = proto_instruction
+                .try_into()
+                .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+
+            match instruction {
+                InstructionForWebServer::ShutdownWebServer => {
+                    handle.shutdown();
+                    Ok(true) // signal to break
+                },
+                InstructionForWebServer::QueryVersion => {
+                    let response = WebServerResponse::Version(VersionInfo {
+                        version: zellij_utils::consts::VERSION.to_string(),
+                        ip: ip.to_string(),
+                        port,
+                    });
+                    let proto_response: ProtoWebServerResponse = response.into();
+                    let encoded = proto_response.encode_to_vec();
+                    let len = encoded.len() as u32;
+                    stream.write_all(&len.to_le_bytes())?;
+                    stream.write_all(&encoded)?;
+                    stream.flush()?;
+                    Ok(false)
+                },
+            }
+        })
+        .await;
+
+        match result {
+            Ok(Ok(true)) => break,  // shutdown requested
+            Ok(Ok(false)) => {},     // handled, continue listening
+            Ok(Err(e)) => {
+                log::error!("Failed to process web server instruction: {}", e);
+                break;
             },
             Err(e) => {
                 log::error!("Failed to listen to ipc channel: {}", e);

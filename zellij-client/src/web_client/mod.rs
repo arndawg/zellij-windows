@@ -28,10 +28,14 @@ use tokio::runtime::Runtime;
 use axum_server::tls_rustls::RustlsConfig;
 use axum_server::Handle;
 
+#[cfg(unix)]
 use daemonize::{self, Outcome};
+#[cfg(unix)]
 use nix::sys::stat::{umask, Mode};
 
+#[cfg(unix)]
 use interprocess::unnamed_pipe::pipe;
+#[cfg(unix)]
 use std::io::{prelude::*, BufRead, BufReader};
 use zellij_utils::input::{config::Config, options::Options};
 
@@ -97,13 +101,28 @@ pub fn start_web_client(
         eprintln!("{}", e);
         std::process::exit(2);
     };
-    let (runtime, listener, tls_config) = if run_daemonized {
-        daemonize_web_server(
-            web_server_ip,
-            web_server_port,
-            web_server_cert,
-            web_server_key,
-        )
+    #[cfg(windows)]
+    if run_daemonized {
+        log::warn!("Daemonized web server is not supported on Windows, running in foreground");
+    }
+
+    #[cfg(unix)]
+    let daemonize = run_daemonized;
+    #[cfg(windows)]
+    let daemonize = false;
+
+    let (runtime, listener, tls_config) = if daemonize {
+        #[cfg(unix)]
+        {
+            daemonize_web_server(
+                web_server_ip,
+                web_server_port,
+                web_server_cert,
+                web_server_key,
+            )
+        }
+        #[cfg(not(unix))]
+        unreachable!()
     } else {
         let runtime = Runtime::new().unwrap();
         let listener = runtime.block_on(async move {
@@ -247,6 +266,7 @@ pub async fn serve_web_client(
     }
 }
 
+#[cfg(unix)]
 fn daemonize_web_server(
     web_server_ip: IpAddr,
     web_server_port: u16,

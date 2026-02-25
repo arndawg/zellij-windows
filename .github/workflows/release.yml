@@ -1,8 +1,7 @@
 name: Release
+
+# Disabled for Windows fork — upstream release CI
 on:
-  push:
-    tags:
-      - 'v*.*.*'
   workflow_dispatch:
 
 jobs:

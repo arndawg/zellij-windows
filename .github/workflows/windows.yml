@@ -42,7 +42,7 @@ jobs:
           restore-keys: windows-cargo-
 
       - name: Build Release
-        run: cargo build --release --no-default-features --features plugins_from_target
+        run: cargo build --release --no-default-features --features "plugins_from_target,web_server_capability"
 
       - name: Upload build artifact
         if: success()
@@ -85,7 +85,7 @@ jobs:
           restore-keys: windows-cargo-
 
       - name: Build Release
-        run: cargo build --release --no-default-features --features plugins_from_target
+        run: cargo build --release --no-default-features --features "plugins_from_target,web_server_capability"
 
       - name: Package release
         shell: pwsh
