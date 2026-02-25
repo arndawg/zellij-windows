@@ -116,9 +116,19 @@ pub fn query_webserver_with_response(
 }
 
 fn receive_webserver_response(mut stream: LocalSocketStream) -> Result<WebServerResponse> {
+    use crate::ipc::MAX_IPC_MSG_SIZE;
+
     let mut len_bytes = [0u8; 4];
     stream.read_exact(&mut len_bytes)?;
     let len = u32::from_le_bytes(len_bytes) as usize;
+
+    if len > MAX_IPC_MSG_SIZE {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("IPC message too large: {} bytes", len),
+        )
+        .into());
+    }
 
     let mut buffer = vec![0u8; len];
     stream.read_exact(&mut buffer)?;

@@ -19,6 +19,9 @@ ConPTY support, Windows IPC, signal handling, and platform abstractions.
 - **Terminal rendering**: Full VT output via crossterm with Windows support
 - **Plugin loading**: WASI plugins load from the target directory
 - **Session management**: Named sessions with IPC via Windows named pipes
+- **IPC security**: Named pipes use per-user ACLs (SDDL) and `nMaxInstances=1`
+  to prevent unauthorized access and pipe squatting; IPC messages are
+  size-limited (64 MiB) to prevent OOM from malicious/corrupted peers
 - **Resize**: Dynamic terminal and pane resize
 - **Web server**: Browser-based terminal access via `zellij web`
   (note: `--daemonize` is not supported on Windows — runs in foreground)
@@ -86,7 +89,8 @@ upstream architecture:
 - **ConPTY patches**: `portable-pty-patch/` — forked portable-pty with
   Windows-specific fixes (flag tuning, pipe buffer)
 - **IPC**: Windows named pipes for session discovery, replacing Unix domain
-  sockets
+  sockets. Web server listener uses ACL-secured pipes (`accept_secure_pipe_connection`
+  in `ipc.rs`) with current-user-only access and single-instance enforcement
 - **Plugins**: WASI plugins load from the build target directory with
   Windows path normalization
 

@@ -31,10 +31,19 @@ pub async fn create_webserver_receiver(
 pub async fn receive_webserver_instruction(
     receiver: &mut UnixStream,
 ) -> std::io::Result<InstructionForWebServer> {
+    use zellij_utils::ipc::MAX_IPC_MSG_SIZE;
+
     // Read length prefix (4 bytes)
     let mut len_bytes = [0u8; 4];
     receiver.read_exact(&mut len_bytes).await?;
     let len = u32::from_le_bytes(len_bytes) as usize;
+
+    if len > MAX_IPC_MSG_SIZE {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("IPC message too large: {} bytes", len),
+        ));
+    }
 
     // Read protobuf message
     let mut buffer = vec![0u8; len];
@@ -103,8 +112,8 @@ pub async fn listen_to_web_server_instructions(
     }
 }
 
-// Windows implementation using interprocess local_socket (named pipes)
-// wrapped in spawn_blocking since interprocess doesn't have async support.
+// Windows implementation using ACL-secured named pipes (via CreateNamedPipeW).
+// Wrapped in spawn_blocking since named pipe I/O is synchronous.
 #[cfg(windows)]
 pub async fn listen_to_web_server_instructions(
     server_handle: Handle,
@@ -112,9 +121,6 @@ pub async fn listen_to_web_server_instructions(
     web_server_ip: IpAddr,
     web_server_port: u16,
 ) {
-    use interprocess::local_socket::{prelude::*, ListenerOptions};
-    use zellij_utils::ipc::path_to_ipc_name;
-
     std::fs::create_dir_all(&WEBSERVER_SOCKET_PATH.as_path()).ok();
     let socket_path = WEBSERVER_SOCKET_PATH.join(format!("{}", id));
 
@@ -125,17 +131,19 @@ pub async fn listen_to_web_server_instructions(
         let handle = server_handle.clone();
 
         let result = tokio::task::spawn_blocking(move || -> Result<bool, Box<dyn std::error::Error + Send + Sync>> {
-            let fs_name = path_to_ipc_name(&path)?;
-            let listener = ListenerOptions::new()
-                .name(fs_name)
-                .create_sync()?;
-            let mut stream = listener.incoming().next()
-                .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::Other, "no incoming connection"))??;
+            let mut stream = zellij_utils::ipc::accept_secure_pipe_connection(&path)?;
 
             // Read length prefix (4 bytes)
             let mut len_bytes = [0u8; 4];
             stream.read_exact(&mut len_bytes)?;
             let len = u32::from_le_bytes(len_bytes) as usize;
+
+            if len > zellij_utils::ipc::MAX_IPC_MSG_SIZE {
+                return Err(Box::new(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("IPC message too large: {} bytes", len),
+                )));
+            }
 
             // Read protobuf message
             let mut buffer = vec![0u8; len];

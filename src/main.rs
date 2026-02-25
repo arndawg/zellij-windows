@@ -50,7 +50,11 @@ fn main() {
             if conin != windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE {
                 let mut events: [INPUT_RECORD; 32] = std::mem::zeroed();
                 let mut count: u32 = 0;
-                PeekConsoleInputW(conin, events.as_mut_ptr(), 32, &mut count);
+                let peek_ok = PeekConsoleInputW(conin, events.as_mut_ptr(), 32, &mut count);
+                if peek_ok == 0 {
+                    windows_sys::Win32::Foundation::CloseHandle(conin);
+                    std::process::exit(42);
+                }
                 windows_sys::Win32::Foundation::CloseHandle(conin);
 
                 // Check if any pending event has the 0x03 (Ctrl+C) character
