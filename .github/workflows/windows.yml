@@ -1,0 +1,141 @@
+name: Windows CI
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build (Windows)
+    runs-on: windows-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ github.token }}
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: windows-cargo-
+
+      - name: Build Release
+        run: cargo build --release --no-default-features --features plugins_from_target
+
+      - name: Upload build artifact
+        if: success()
+        uses: actions/upload-artifact@v4
+        with:
+          name: zellij-windows
+          path: target/release/zellij.exe
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: windows-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Protoc
+        uses: arduino/setup-protoc@v3
+        with:
+          repo-token: ${{ github.token }}
+
+      - name: Setup Rust toolchain
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          rustflags: ""
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: windows-cargo-${{ hashFiles('Cargo.lock') }}
+          restore-keys: windows-cargo-
+
+      - name: Build Release
+        run: cargo build --release --no-default-features --features plugins_from_target
+
+      - name: Package release
+        shell: pwsh
+        run: |
+          $version = "${{ github.ref_name }}"
+          $zipName = "zellij-windows-$version.zip"
+          $stagingDir = "release-staging"
+
+          New-Item -ItemType Directory -Path $stagingDir
+          Copy-Item target/release/zellij.exe $stagingDir/
+
+          @"
+          zellij-windows $version
+
+          Installation:
+            1. Extract this zip to a folder (e.g., C:\tools\zellij)
+            2. Add that folder to your PATH
+            3. Run: zellij
+
+          Requirements:
+            - Windows 10 version 1809+ (for ConPTY support)
+            - Windows Terminal or a VT-capable console host
+
+          More info: https://github.com/arndawg/zellij-windows
+          "@ | Out-File -Encoding UTF8 $stagingDir/README.txt
+
+          Compress-Archive -Path "$stagingDir/*" -DestinationPath $zipName
+
+          $hash = (Get-FileHash $zipName -Algorithm SHA256).Hash
+          "$hash  $zipName" | Out-File -Encoding UTF8 "$zipName.sha256"
+
+          echo "ZIP_NAME=$zipName" >> $env:GITHUB_ENV
+          echo "ZIP_HASH=$hash" >> $env:GITHUB_ENV
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            ${{ env.ZIP_NAME }}
+            ${{ env.ZIP_NAME }}.sha256
+          body: |
+            ## zellij for Windows ${{ github.ref_name }}
+
+            **SHA256:** `${{ env.ZIP_HASH }}`
+
+            ### Installation
+            1. Download `${{ env.ZIP_NAME }}`
+            2. Extract to a folder in your `%PATH%`
+            3. Run `zellij`
+
+            ### Requirements
+            - Windows 10 version 1809+
+            - Windows Terminal or VT-capable console
+
+            ### What's included
+            - `zellij.exe` (Release build)
+
+            See the [README](https://github.com/arndawg/zellij-windows) for full documentation.
+          generate_release_notes: true
