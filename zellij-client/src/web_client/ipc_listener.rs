@@ -124,6 +124,14 @@ pub async fn listen_to_web_server_instructions(
     std::fs::create_dir_all(&WEBSERVER_SOCKET_PATH.as_path()).ok();
     let socket_path = WEBSERVER_SOCKET_PATH.join(format!("{}", id));
 
+    // Create marker file so discover_webserver_sockets() can find this instance.
+    // Named pipes are kernel objects, not filesystem entries, so we need this
+    // marker for the same discovery mechanism Unix uses with socket files.
+    if let Err(e) = std::fs::File::create(&socket_path) {
+        log::error!("Failed to create web server marker file: {}", e);
+        return;
+    }
+
     loop {
         let path = socket_path.clone();
         let ip = web_server_ip;
@@ -191,4 +199,7 @@ pub async fn listen_to_web_server_instructions(
             },
         }
     }
+
+    // Clean up marker file
+    let _ = std::fs::remove_file(&socket_path);
 }

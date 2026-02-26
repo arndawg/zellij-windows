@@ -147,8 +147,8 @@ mod not_wasm {
 
 /// Check if a filesystem entry is an IPC socket.
 ///
-/// On Unix, this checks `FileTypeExt::is_socket()`. On non-Unix platforms,
-/// this returns `false` — session discovery uses a different mechanism.
+/// On Unix, this checks `FileTypeExt::is_socket()`. On Windows, named pipes
+/// are kernel objects so we use marker files (regular files) for discovery.
 #[cfg(unix)]
 pub fn is_ipc_socket(file_type: &std::fs::FileType) -> bool {
     use std::os::unix::fs::FileTypeExt;
@@ -156,8 +156,8 @@ pub fn is_ipc_socket(file_type: &std::fs::FileType) -> bool {
 }
 
 #[cfg(not(unix))]
-pub fn is_ipc_socket(_file_type: &std::fs::FileType) -> bool {
-    false
+pub fn is_ipc_socket(file_type: &std::fs::FileType) -> bool {
+    file_type.is_file()
 }
 
 #[cfg(unix)]
