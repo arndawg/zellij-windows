@@ -97,21 +97,6 @@ jobs:
           New-Item -ItemType Directory -Path $stagingDir
           Copy-Item target/release/zellij.exe $stagingDir/
 
-          @"
-          zellij-windows $version
-
-          Installation:
-            1. Extract this zip to a folder (e.g., C:\tools\zellij)
-            2. Add that folder to your PATH
-            3. Run: zellij
-
-          Requirements:
-            - Windows 10 version 1809+ (for ConPTY support)
-            - Windows Terminal or a VT-capable console host
-
-          More info: https://github.com/arndawg/zellij-windows
-          "@ | Out-File -Encoding UTF8 $stagingDir/README.txt
-
           Compress-Archive -Path "$stagingDir/*" -DestinationPath $zipName
 
           $hash = (Get-FileHash $zipName -Algorithm SHA256).Hash
