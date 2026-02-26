@@ -684,6 +684,12 @@ pub fn start_server(mut os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
         if let Err(e) = std::fs::create_dir_all(&session_info_dir) {
             log::warn!("Failed to create session info cache dir: {:?}", e);
         }
+        // Write server PID so clients can quickly check if the session is alive
+        // without waiting for an IPC timeout.
+        let pid_file = zellij_utils::consts::session_pid_file_name(session_name);
+        if let Err(e) = std::fs::write(&pid_file, std::process::id().to_string()) {
+            log::warn!("Failed to write server PID file: {:?}", e);
+        }
     }
 
     let (to_server, server_receiver): ChannelWithContext<ServerInstruction> = channels::bounded(50);

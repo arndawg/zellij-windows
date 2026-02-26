@@ -2231,9 +2231,14 @@ pub fn get_default_shell() -> PathBuf {
     }
     #[cfg(windows)]
     {
-        PathBuf::from(std::env::var("COMSPEC").unwrap_or_else(|_| {
-            log::warn!("Cannot read COMSPEC env, falling back to cmd.exe");
-            "cmd.exe".to_string()
-        }))
+        // Prefer $SHELL (set by Git Bash, MSYS2, etc.) over $COMSPEC (cmd.exe)
+        if let Ok(shell) = std::env::var("SHELL") {
+            PathBuf::from(shell)
+        } else {
+            PathBuf::from(std::env::var("COMSPEC").unwrap_or_else(|_| {
+                log::warn!("Cannot read SHELL or COMSPEC env, falling back to cmd.exe");
+                "cmd.exe".to_string()
+            }))
+        }
     }
 }

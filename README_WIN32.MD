@@ -31,15 +31,9 @@ ConPTY support, Windows IPC, signal handling, and platform abstractions.
 
 ## What Doesn't Work / Known Limitations
 
-- **ConPTY output lag with mode 2026**: Applications that use synchronized
-  output (ESC[?2026h/l), such as Claude Code's Ink framework, cause ConPTY's
-  conhost to buffer output for 1-4 seconds per render cycle. This is a Windows
-  platform limitation — tmux has identical stalls. See `ctrlc_investigation.md`
-  for the full 16-session investigation
 - **Ctrl+C delivery**: Uses a PeekConsoleInput helper process spawned inside
-  the ConPTY to detect whether the child consumes stdin. Works for interactive
+  the ConPTY to inject Ctrl+C via `WriteConsoleInput`. Works for interactive
   programs (Claude Code, node) and non-interactive programs (ping, dir /s)
-  but has edge cases during application startup
 - **Sixel/image support**: Disabled (DA1 reports VT100+AVO to match tmux)
 
 ## Installation

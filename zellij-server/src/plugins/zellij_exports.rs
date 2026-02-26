@@ -42,6 +42,8 @@ use zellij_utils::data::{
 use zellij_utils::home::default_layout_dir;
 use zellij_utils::input::permission::PermissionCache;
 use zellij_utils::ipc::{ClientToServerMsg, IpcSenderWithContext};
+#[cfg(windows)]
+use zellij_utils::ipc::{IpcReceiverWithContext, ServerToClientMsg};
 use zellij_utils::sessions::generate_random_name as generate_random_name_impl;
 #[cfg(feature = "web_server_capability")]
 use zellij_utils::web_authentication_tokens::{
@@ -3178,8 +3180,42 @@ fn kill_sessions(session_names: Vec<String>) {
         };
         match LocalSocketStream::connect(fs_name) {
             Ok(stream) => {
-                let _ = IpcSenderWithContext::<ClientToServerMsg>::new(stream)
-                    .send_client_msg(ClientToServerMsg::KillSession);
+                #[cfg(windows)]
+                {
+                    let reverse_name =
+                        match zellij_utils::ipc::path_to_ipc_name_reverse(path) {
+                            Ok(name) => name,
+                            Err(e) => {
+                                log::error!(
+                                    "Failed to get reverse pipe for session {}: {:?}",
+                                    session_name,
+                                    e
+                                );
+                                continue;
+                            },
+                        };
+                    let reverse_stream = match LocalSocketStream::connect(reverse_name) {
+                        Ok(s) => s,
+                        Err(e) => {
+                            log::error!(
+                                "Failed to connect reverse pipe for session {}: {:?}",
+                                session_name,
+                                e
+                            );
+                            continue;
+                        },
+                    };
+                    let _ = IpcSenderWithContext::<ClientToServerMsg>::new(stream)
+                        .send_client_msg(ClientToServerMsg::KillSession);
+                    let mut receiver: IpcReceiverWithContext<ServerToClientMsg> =
+                        IpcReceiverWithContext::new(reverse_stream);
+                    let _ = receiver.recv_server_msg();
+                }
+                #[cfg(not(windows))]
+                {
+                    let _ = IpcSenderWithContext::<ClientToServerMsg>::new(stream)
+                        .send_client_msg(ClientToServerMsg::KillSession);
+                }
             },
             Err(e) => {
                 log::error!("Failed to kill session {}: {:?}", session_name, e);

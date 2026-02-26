@@ -2,7 +2,7 @@
 use crate::consts::is_ipc_socket;
 use crate::{
     consts::{
-        session_info_folder_for_session, session_layout_cache_file_name,
+        session_info_folder_for_session, session_layout_cache_file_name, session_pid_file_name,
         ZELLIJ_SESSION_INFO_CACHE_DIR, ZELLIJ_SOCK_DIR,
     },
     envs,
@@ -199,6 +199,15 @@ pub fn get_sessions_sorted_by_mtime() -> anyhow::Result<Vec<String>> {
 }
 
 fn assert_socket(name: &str) -> bool {
+    // Fast path: if a PID file exists and the process is dead, skip the IPC probe.
+    // This avoids the 3-second timeout for stale sessions on Windows.
+    #[cfg(windows)]
+    {
+        if let Some(false) = is_server_process_alive(name) {
+            return false;
+        }
+    }
+
     let path = &*ZELLIJ_SOCK_DIR.join(name);
     let name_owned = name.to_owned();
     let path_owned = path.to_path_buf();
@@ -210,6 +219,31 @@ fn assert_socket(name: &str) -> bool {
         let _ = tx.send(result);
     });
     rx.recv_timeout(Duration::from_secs(3)).unwrap_or(false)
+}
+
+/// Check if the server process for a session is still alive using its PID file.
+/// Returns `Some(true)` if alive, `Some(false)` if dead, `None` if PID file missing.
+#[cfg(windows)]
+fn is_server_process_alive(session_name: &str) -> Option<bool> {
+    let pid_file = session_pid_file_name(session_name);
+    let pid_str = fs::read_to_string(&pid_file).ok()?;
+    let pid: u32 = pid_str.trim().parse().ok()?;
+    Some(win_process_alive(pid))
+}
+
+#[cfg(windows)]
+fn win_process_alive(pid: u32) -> bool {
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            // Process doesn't exist or we can't access it
+            return false;
+        }
+        CloseHandle(handle);
+        true
+    }
 }
 
 fn assert_socket_inner(_name: &str, path: &std::path::Path) -> bool {
@@ -356,8 +390,34 @@ pub fn kill_session(name: &str) {
     };
     match LocalSocketStream::connect(fs_name) {
         Ok(stream) => {
-            let _ = IpcSenderWithContext::<ClientToServerMsg>::new(stream)
-                .send_client_msg(ClientToServerMsg::KillSession);
+            #[cfg(windows)]
+            {
+                let reverse_name = match crate::ipc::path_to_ipc_name_reverse(path) {
+                    Ok(name) => name,
+                    Err(e) => {
+                        eprintln!("Error occurred: {:?}", e);
+                        process::exit(1);
+                    },
+                };
+                let reverse_stream = match LocalSocketStream::connect(reverse_name) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("Error occurred: {:?}", e);
+                        process::exit(1);
+                    },
+                };
+                let _ = IpcSenderWithContext::<ClientToServerMsg>::new(stream)
+                    .send_client_msg(ClientToServerMsg::KillSession);
+                let mut receiver: IpcReceiverWithContext<ServerToClientMsg> =
+                    IpcReceiverWithContext::new(reverse_stream);
+                // Wait for the server to acknowledge the kill
+                let _ = receiver.recv_server_msg();
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = IpcSenderWithContext::<ClientToServerMsg>::new(stream)
+                    .send_client_msg(ClientToServerMsg::KillSession);
+            }
         },
         Err(e) => {
             eprintln!("Error occurred: {:?}", e);
@@ -369,14 +429,35 @@ pub fn kill_session(name: &str) {
 pub fn delete_session(name: &str, force: bool) {
     if force {
         let path = &*ZELLIJ_SOCK_DIR.join(name);
-        let _ = path_to_ipc_name(path)
-            .ok()
-            .and_then(|fs_name| LocalSocketStream::connect(fs_name).ok())
-            .map(|stream| {
-                IpcSenderWithContext::<ClientToServerMsg>::new(stream)
-                    .send_client_msg(ClientToServerMsg::KillSession)
-                    .ok();
-            });
+        #[cfg(windows)]
+        {
+            let _ = path_to_ipc_name(path)
+                .ok()
+                .and_then(|fs_name| LocalSocketStream::connect(fs_name).ok())
+                .and_then(|stream| {
+                    let reverse_stream = crate::ipc::path_to_ipc_name_reverse(path)
+                        .ok()
+                        .and_then(|rn| LocalSocketStream::connect(rn).ok())?;
+                    IpcSenderWithContext::<ClientToServerMsg>::new(stream)
+                        .send_client_msg(ClientToServerMsg::KillSession)
+                        .ok();
+                    let mut receiver: IpcReceiverWithContext<ServerToClientMsg> =
+                        IpcReceiverWithContext::new(reverse_stream);
+                    let _ = receiver.recv_server_msg();
+                    Some(())
+                });
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = path_to_ipc_name(path)
+                .ok()
+                .and_then(|fs_name| LocalSocketStream::connect(fs_name).ok())
+                .map(|stream| {
+                    IpcSenderWithContext::<ClientToServerMsg>::new(stream)
+                        .send_client_msg(ClientToServerMsg::KillSession)
+                        .ok();
+                });
+        }
     }
     if let Err(e) = std::fs::remove_dir_all(session_info_folder_for_session(name)) {
         if e.kind() == std::io::ErrorKind::NotFound {

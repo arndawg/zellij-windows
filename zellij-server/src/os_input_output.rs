@@ -40,12 +40,12 @@ pub(crate) fn command_exists(cmd: &RunCommand) -> bool {
     match cmd.cwd.as_ref() {
         Some(cwd) => {
             let full_command = cwd.join(&command);
-            if full_command.exists() && full_command.is_file() {
+            if file_exists_with_pathext(&full_command) {
                 return true;
             }
         },
         None => {
-            if command.exists() && command.is_file() {
+            if file_exists_with_pathext(command) {
                 return true;
             }
         },
@@ -54,8 +54,34 @@ pub(crate) fn command_exists(cmd: &RunCommand) -> bool {
     if let Some(paths) = env::var_os("PATH") {
         for path in env::split_paths(&paths) {
             let full_command = path.join(command);
-            if full_command.exists() && full_command.is_file() {
+            if file_exists_with_pathext(&full_command) {
                 return true;
+            }
+        }
+    }
+    false
+}
+
+/// Check if a file exists, trying PATHEXT extensions on Windows.
+///
+/// On Windows, commands like `pwsh` (without `.exe`) don't match the filesystem
+/// directly. This function tries the bare path first, then appends each extension
+/// from the PATHEXT environment variable (e.g. `.EXE`, `.CMD`, `.BAT`).
+fn file_exists_with_pathext(path: &std::path::Path) -> bool {
+    if path.exists() && path.is_file() {
+        return true;
+    }
+    #[cfg(windows)]
+    {
+        if path.extension().is_none() {
+            if let Some(pathext) = env::var_os("PATHEXT") {
+                for ext in env::split_paths(&pathext) {
+                    let ext_str = ext.to_string_lossy();
+                    let with_ext = path.with_extension(ext_str.trim_start_matches('.'));
+                    if with_ext.exists() && with_ext.is_file() {
+                        return true;
+                    }
+                }
             }
         }
     }

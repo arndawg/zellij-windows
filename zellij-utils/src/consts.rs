@@ -26,6 +26,10 @@ pub fn session_info_cache_file_name(session_name: &str) -> PathBuf {
     session_info_folder_for_session(session_name).join("session-metadata.kdl")
 }
 
+pub fn session_pid_file_name(session_name: &str) -> PathBuf {
+    session_info_folder_for_session(session_name).join("server.pid")
+}
+
 pub fn session_layout_cache_file_name(session_name: &str) -> PathBuf {
     session_info_folder_for_session(session_name).join("session-layout.kdl")
 }
