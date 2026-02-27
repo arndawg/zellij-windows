@@ -363,6 +363,8 @@ impl App {
             self.ui.link_executable = Some("xdg-open");
         } else if context.contains_key("open_cli") && exit_code == Some(0) {
             self.ui.link_executable = Some("open");
+        } else if context.contains_key("explorer_cli") && exit_code == Some(0) {
+            self.ui.link_executable = Some("explorer.exe");
         }
         false
     }
@@ -380,6 +382,11 @@ impl App {
         let mut open_context = BTreeMap::new();
         open_context.insert("open_cli".to_owned(), String::new());
         run_command(&["open", "--help"], open_context);
+
+        // Windows: explorer.exe can open URLs in the default browser
+        let mut explorer_context = BTreeMap::new();
+        explorer_context.insert("explorer_cli".to_owned(), String::new());
+        run_command(&["where.exe", "explorer.exe"], explorer_context);
     }
 
     fn render_no_capability_message(&self, rows: usize, cols: usize) {

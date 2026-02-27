@@ -138,6 +138,7 @@ impl ZellijPlugin for App {
             Event::RunCommandResult(exit_code, _stdout, _stderr, context) => {
                 let is_xdg_open = context.get("xdg_open_cli").is_some();
                 let is_open = context.get("open_cli").is_some();
+                let is_explorer = context.get("explorer_cli").is_some();
                 if is_xdg_open {
                     if exit_code == Some(0) {
                         self.update_link_executable("xdg-open".to_owned());
@@ -145,6 +146,10 @@ impl ZellijPlugin for App {
                 } else if is_open {
                     if exit_code == Some(0) {
                         self.update_link_executable("open".to_owned());
+                    }
+                } else if is_explorer {
+                    if exit_code == Some(0) {
+                        self.update_link_executable("explorer.exe".to_owned());
                     }
                 }
             },
@@ -189,6 +194,10 @@ impl App {
         let mut open_context = BTreeMap::new();
         open_context.insert("open_cli".to_owned(), String::new());
         run_command(&["open", "--help"], open_context);
+        // Windows: explorer.exe can open URLs in the default browser
+        let mut explorer_context = BTreeMap::new();
+        explorer_context.insert("explorer_cli".to_owned(), String::new());
+        run_command(&["where.exe", "explorer.exe"], explorer_context);
     }
     pub fn update_link_executable(&mut self, new_link_executable: String) {
         *self.link_executable.borrow_mut() = new_link_executable;
