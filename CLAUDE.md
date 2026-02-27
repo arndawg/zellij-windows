@@ -42,6 +42,23 @@ cd ../..
 # Then do the normal release build
 ```
 
+## Versioning
+
+When tagging a new release (e.g. `v0.43.1-win32.5`), update the version in
+`Cargo.toml` workspace to match:
+
+```toml
+# In Cargo.toml [workspace.package]
+version = "0.43.1-win32.5"
+
+# Also update the path dependency versions in [dependencies] and [workspace.dependencies]
+zellij-client = { path = "zellij-client/", version = "0.43.1-win32.5" }
+zellij-server = { path = "zellij-server/", version = "0.43.1-win32.5" }
+zellij-utils = { path = "zellij-utils/", version = "0.43.1-win32.5" }
+```
+
+This ensures `zellij --version` matches the release tag and winget manifest.
+
 ## Winget Package Submission
 
 Package: `arndawg.zellij-windows` in `microsoft/winget-pkgs`.
