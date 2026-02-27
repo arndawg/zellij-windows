@@ -14,8 +14,8 @@ rust-version.workspace = true
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-zellij-client = { path = "zellij-client/", version = "0.43.1-win32.4" }
-zellij-server = { path = "zellij-server/", version = "0.43.1-win32.4" }
+zellij-client = { path = "zellij-client/", version = "0.43.1-win32.5" }
+zellij-server = { path = "zellij-server/", version = "0.43.1-win32.5" }
 zellij-utils = { workspace = true }
 anyhow = { workspace = true }
 clap = { workspace = true }
@@ -66,7 +66,7 @@ members = [
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/zellij-org/zellij"
-version = "0.43.1-win32.4"
+version = "0.43.1-win32.5"
 # NOTE: When updating this, modify `channel` in `rust-toolchain.toml` accordingly
 rust-version = "1.92"
 
@@ -111,7 +111,7 @@ portable-pty = { version = "0.9", default-features = false }
 names = { version = "0.14.0", default-features = false }
 include_dir = { version = "0.7.3", default-features = false }
 sha2 = { version = "0.10", default-features = false }
-zellij-utils = { path = "zellij-utils/", version = "0.43.1-win32.4" }
+zellij-utils = { path = "zellij-utils/", version = "0.43.1-win32.5" }
 
 [patch.crates-io]
 portable-pty = { path = "portable-pty-patch" }
